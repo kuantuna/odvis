@@ -1,3 +1,4 @@
+import copy
 import math
 import random
 
@@ -6,8 +7,9 @@ import torch.nn.functional as F
 from torch import nn
 
 from detectron2.modeling import META_ARCH_REGISTRY, build_backbone
-from detectron2.structures import ImageList
+from detectron2.structures import ImageList, Boxes
 
+from .head import DynamicHead
 from .util.box_ops import box_cxcywh_to_xyxy, box_xyxy_to_cxcywh
 
 __all__ = ["ODVIS"]
@@ -39,40 +41,6 @@ def default(val, d):
 def exists(x):
     return x is not None
 
-def aligned_bilinear(tensor, factor):
-    assert tensor.dim() == 4
-    assert factor >= 1
-    assert int(factor) == factor
-    if factor == 1:
-        return tensor
-
-    h, w = tensor.size()[2:]
-    tensor = F.pad(tensor, pad=(0, 1, 0, 1), mode="replicate")
-    oh = factor * h + 1
-    ow = factor * w + 1
-    tensor = F.interpolate(tensor,
-                           size=(oh, ow),
-                           mode='bilinear',
-                           align_corners=True)
-    tensor = F.pad(tensor,
-                   pad=(factor // 2, 0, factor // 2, 0),
-                   mode="replicate")
-    return tensor[:, :, :oh - 1, :ow - 1]
-
-
-class SinusoidalPositionEmbeddings(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.dim = dim
-
-    def forward(self, time):
-        device = time.device
-        half_dim = self.dim // 2
-        embeddings = math.log(10000) / (half_dim - 1)
-        embeddings = torch.exp(torch.arange(half_dim, device=device) * -embeddings)
-        embeddings = time[:, None] * embeddings[None, :]
-        embeddings = torch.cat((embeddings.sin(), embeddings.cos()), dim=-1)
-        return embeddings
 
 
 @META_ARCH_REGISTRY.register()
@@ -134,60 +102,12 @@ class ODVIS(nn.Module):
         self.register_buffer('posterior_mean_coef2',
                              (1. - alphas_cumprod_prev) * torch.sqrt(alphas) / (1. - alphas_cumprod))
 
-        d_model = cfg.MODEL.ODVIS.HIDDEN_DIM
-        time_dim = d_model * 4
-        self.time_mlp = nn.Sequential(
-            SinusoidalPositionEmbeddings(d_model),
-            nn.Linear(d_model, time_dim),
-            nn.GELU(),
-            nn.Linear(time_dim, time_dim),
-        )
+        self.head = DynamicHead(cfg=cfg, roi_input_shape=self.backbone.output_shape())
 
         pixel_mean = torch.Tensor(cfg.MODEL.PIXEL_MEAN).to(self.device).view(3, 1, 1)
         pixel_std = torch.Tensor(cfg.MODEL.PIXEL_STD).to(self.device).view(3, 1, 1)
         self.normalizer = lambda x: (x - pixel_mean) / pixel_std
 
-
-        # mask branch
-        self.stacked_convs = 4
-        
-        self.mask_refine = nn.ModuleList()
-        in_features = ['p3', 'p4', 'p5']
-        for in_feature in in_features:
-            conv_block = []
-            conv_block.append(
-                nn.Conv2d(d_model,
-                          128,
-                          kernel_size=3,
-                          stride=1,
-                          padding=1,
-                          bias=False))
-            conv_block.append(nn.BatchNorm2d(128))
-            conv_block.append(nn.ReLU())
-            conv_block = nn.Sequential(*conv_block)
-            self.mask_refine.append(conv_block)
-        tower = []
-        for i in range(self.stacked_convs):
-            conv_block = []
-            conv_block.append(
-                nn.Conv2d(128,
-                          128,
-                          kernel_size=3,
-                          stride=1,
-                          padding=1,
-                          bias=False))
-            conv_block.append(nn.BatchNorm2d(128))
-            conv_block.append(nn.ReLU())
-
-            conv_block = nn.Sequential(*conv_block)
-            tower.append(conv_block)
-
-        tower.append(
-            nn.Conv2d(128,
-                      8,
-                      kernel_size=1,
-                      stride=1))
-        self.mask_head = nn.Sequential(*tower)
     
     def forward(self, batched_inputs):
         if self.training:
@@ -201,12 +121,16 @@ class ODVIS(nn.Module):
             features = [src[f] for f in self.features]
             key_features, ref_features = self.divide_features(features)
 
-            f_mask = self.mask_branch(key_features)
-            k_out = self.decoder(key_features, diffused_boxes, t, None)
-            cls_logits, pred_bboxes, pred_masks = self.heads(k_out, f_mask)
+            outputs_class, outputs_coord, outputs_kernel, k_propsal_features, mask_feat = self.head(key_features, diffused_boxes, t, None, is_key=True)
+            _, _, _, ref_proposal_features, _ = self.head(ref_features, diffused_boxes, t, None, is_key=False)
 
-            r_out = self.decoder(ref_features, diffused_boxes, t, None)
-            self.contrastive_head(k_out, r_out)
+
+            # f_mask = self.mask_branch(key_features)
+            # outputs_class, outputs_coord, outputs_kernel, k_out = self.decoder(key_features, diffused_boxes, t, None)
+            # pred_masks = self.mask_head(outputs_kernel, f_mask)
+
+            # r_out = self.decoder(ref_features, diffused_boxes, t, None)
+            # self.contrastive_head(k_out, r_out)
 
             """
             if not self.training:
@@ -349,45 +273,3 @@ class ODVIS(nn.Module):
         ref_features = 2
         return key_features, ref_features
 
-    def mask_branch(self, features):
-        for i, (x) in enumerate(features):
-            if i == 0:
-                f_mask = self.mask_refine[i](x)
-            elif i <= 2:
-                x_p = self.mask_refine[i](x)
-                target_h, target_w = f_mask.size()[2:]
-                h, w = x_p.size()[2:]
-                assert target_h % h == 0
-                assert target_w % w == 0
-                factor_h, factor_w = target_h // h, target_w // w
-                assert factor_h == factor_w
-                x_p = aligned_bilinear(x_p, factor_h)
-                f_mask = f_mask + x_p
-        return self.mask_head(f_mask)
-
-    def decoder(self, features, init_bboxes, t, init_features):
-        time = self.time_mlp(t)
-        inter_class_logits = []
-        inter_pred_bboxes = []
-        inter_kernel = []
-        #import pdb;pdb.set_trace()
-        bs = len(features[0])
-        bboxes = init_bboxes
-        num_boxes = bboxes.shape[1]
-
-        if init_features is not None:
-            init_features = init_features[None].repeat(1, bs, 1)
-            proposal_features = init_features.clone()
-        else:
-            proposal_features = None
-        
-        for head_idx, rcnn_head in enumerate(self.head_series):
-            #import pdb;pdb.set_trace()
-            class_logits, pred_bboxes, proposal_features,kernel_pred = rcnn_head(features, bboxes, proposal_features, self.box_pooler, time)
-            if self.return_intermediate:
-                inter_class_logits.append(class_logits)
-                inter_pred_bboxes.append(pred_bboxes)
-                inter_kernel.append(kernel_pred)
-                
-                
-            bboxes = pred_bboxes.detach()
