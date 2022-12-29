@@ -9,8 +9,10 @@ from torch import nn
 from detectron2.modeling import META_ARCH_REGISTRY, build_backbone
 from detectron2.structures import ImageList, Boxes
 
+from .loss import SetCriterionDynamicK, HungarianMatcherDynamicK
 from .head import DynamicHead
 from .util.box_ops import box_cxcywh_to_xyxy, box_xyxy_to_cxcywh
+from .util.pos_neg_select import select_pos_neg
 
 __all__ = ["ODVIS"]
 
@@ -52,12 +54,13 @@ class ODVIS(nn.Module):
         self.device = torch.device(cfg.MODEL.DEVICE)
 
         self.in_features = cfg.MODEL.ROI_HEADS.IN_FEATURES
+        self.num_classes = cfg.MODEL.ODVIS.NUM_CLASSES
 
         self.backbone = build_backbone(cfg)
 
         # build diffusion
         timesteps = 1000
-        sampling_timesteps = cfg.MODEL.DiffusionInst.SAMPLE_STEP
+        sampling_timesteps = cfg.MODEL.ODVIS.SAMPLE_STEP
         self.objective = 'pred_x0'
         betas = cosine_beta_schedule(timesteps)
         alphas = 1. - betas
@@ -71,7 +74,7 @@ class ODVIS(nn.Module):
         self.is_ddim_sampling = self.sampling_timesteps < timesteps
         self.ddim_sampling_eta = 1.
         self.self_condition = False
-        self.scale = cfg.MODEL.DiffusionInst.SNR_SCALE
+        self.scale = cfg.MODEL.ODVIS.SNR_SCALE
         self.box_renewal = True
         self.use_ensemble = True
 
@@ -103,35 +106,75 @@ class ODVIS(nn.Module):
                              (1. - alphas_cumprod_prev) * torch.sqrt(alphas) / (1. - alphas_cumprod))
 
         self.head = DynamicHead(cfg=cfg, roi_input_shape=self.backbone.output_shape())
+        self.deep_supervision = cfg.MODEL.ODVIS.DEEP_SUPERVISION
+        self.use_focal = cfg.MODEL.ODVIS.USE_FOCAL
+        self.use_fed_loss = cfg.MODEL.ODVIS.USE_FED_LOSS
+        self.use_nms = cfg.MODEL.ODVIS.USE_NMS
+
+        class_weight = cfg.MODEL.ODVIS.CLASS_WEIGHT
+        giou_weight = cfg.MODEL.ODVIS.GIOU_WEIGHT
+        l1_weight = cfg.MODEL.ODVIS.L1_WEIGHT
+        no_object_weight = cfg.MODEL.ODVIS.NO_OBJECT_WEIGHT
+
+        weight_dict = {"loss_ce": class_weight, "loss_bbox": l1_weight, "loss_giou": giou_weight}
+
+
+        matcher = HungarianMatcherDynamicK(
+            cfg=cfg, cost_class=class_weight, cost_bbox=l1_weight, cost_giou=giou_weight, use_focal=self.use_focal
+        )
+        losses = ["labels", "boxes", "mask"]
+        self.criterion = SetCriterionDynamicK(
+            cfg=cfg, num_classes=self.num_classes, matcher=matcher, weight_dict=weight_dict, eos_coef=no_object_weight,
+            losses=losses, use_focal=self.use_focal,)
 
         pixel_mean = torch.Tensor(cfg.MODEL.PIXEL_MEAN).to(self.device).view(3, 1, 1)
         pixel_std = torch.Tensor(cfg.MODEL.PIXEL_STD).to(self.device).view(3, 1, 1)
         self.normalizer = lambda x: (x - pixel_mean) / pixel_std
+
+        # self.reid_embed_head = MLP(hidden_dim, hidden_dim, hidden_dim, 3)
 
     
     def forward(self, batched_inputs):
         if self.training:
             images, images_whwh = self.preprocess_image(batched_inputs)
             gt_instances = self.extract_gt_instances(batched_inputs)
-            key_targets, ref_targets, diffused_boxes, noises, t = self.prepare_targets(gt_instances)
+            key_targets, ref_targets, diffused_boxes, _, t = self.prepare_targets(gt_instances)
             t = t.squeeze(-1)
             diffused_boxes = diffused_boxes * images_whwh[:, None, :]
 
+            # ?????
             src = self.backbone(images.tensor)
             features = [src[f] for f in self.features]
             key_features, ref_features = self.divide_features(features)
+            # ????
 
-            outputs_class, outputs_coord, outputs_kernel, k_propsal_features, mask_feat = self.head(key_features, diffused_boxes, t, None, is_key=True)
-            _, _, _, ref_proposal_features, _ = self.head(ref_features, diffused_boxes, t, None, is_key=False)
+            outputs_class, outputs_coord, outputs_kernel, key_propsal_features, mask_feat = self.head(key_features, diffused_boxes, t, None, is_key=True)
+            # _, _, _, ref_proposal_features, _ = self.head(ref_features, diffused_boxes, t, None, is_key=False)
+
+            output = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1], 'pred_kernels': outputs_kernel[-1], 'mask_feat':mask_feat}
+
+            if self.deep_supervision:
+                output['aux_outputs'] = [{'pred_logits': a, 'pred_boxes': b}
+                                         for a, b in zip(outputs_class[:-1], outputs_coord[:-1])]
+
+            loss_dict = self.criterion(output, key_targets)
+            weight_dict = self.criterion.weight_dict
+            for k in loss_dict.keys():
+                if k in weight_dict:
+                    loss_dict[k] *= weight_dict[k]
+            return loss_dict
 
 
-            # f_mask = self.mask_branch(key_features)
-            # outputs_class, outputs_coord, outputs_kernel, k_out = self.decoder(key_features, diffused_boxes, t, None)
-            # pred_masks = self.mask_head(outputs_kernel, f_mask)
+            """
+            select_pos_neg(, , ref_targets, key_targets, self.reid_embed_head, key_propsal_features[-1], ref_proposal_features[-1], )
 
-            # r_out = self.decoder(ref_features, diffused_boxes, t, None)
-            # self.contrastive_head(k_out, r_out)
+            f_mask = self.mask_branch(key_features)
+            outputs_class, outputs_coord, outputs_kernel, k_out = self.decoder(key_features, diffused_boxes, t, None)
+            pred_masks = self.mask_head(outputs_kernel, f_mask)
 
+            r_out = self.decoder(ref_features, diffused_boxes, t, None)
+            self.contrastive_head(k_out, r_out)
+            """
             """
             if not self.training:
                 results = self.ddim_sample(batched_inputs, features, images_whwh, images)
@@ -273,3 +316,16 @@ class ODVIS(nn.Module):
         ref_features = 2
         return key_features, ref_features
 
+class MLP(nn.Module):
+    """ Very simple multi-layer perceptron (also called FFN)"""
+
+    def __init__(self, input_dim, hidden_dim, output_dim, num_layers):
+        super().__init__()
+        self.num_layers = num_layers
+        h = [hidden_dim] * (num_layers - 1)
+        self.layers = nn.ModuleList(nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim]))
+
+    def forward(self, x):
+        for i, layer in enumerate(self.layers):
+            x = F.relu(layer(x)) if i < self.num_layers - 1 else layer(x)
+        return x

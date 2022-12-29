@@ -106,17 +106,17 @@ class DynamicHead(nn.Module):
         self.box_pooler = box_pooler
         self.stacked_convs = 4
         # Build heads.
-        num_classes = cfg.MODEL.DiffusionInst.NUM_CLASSES
-        d_model = cfg.MODEL.DiffusionInst.HIDDEN_DIM
-        dim_feedforward = cfg.MODEL.DiffusionInst.DIM_FEEDFORWARD
-        nhead = cfg.MODEL.DiffusionInst.NHEADS
-        dropout = cfg.MODEL.DiffusionInst.DROPOUT
-        activation = cfg.MODEL.DiffusionInst.ACTIVATION
-        num_heads = cfg.MODEL.DiffusionInst.NUM_HEADS
+        num_classes = cfg.MODEL.ODVIS.NUM_CLASSES
+        d_model = cfg.MODEL.ODVIS.HIDDEN_DIM
+        dim_feedforward = cfg.MODEL.ODVIS.DIM_FEEDFORWARD
+        nhead = cfg.MODEL.ODVIS.NHEADS
+        dropout = cfg.MODEL.ODVIS.DROPOUT
+        activation = cfg.MODEL.ODVIS.ACTIVATION
+        num_heads = cfg.MODEL.ODVIS.NUM_HEADS
         rcnn_head = RCNNHead(cfg, d_model, num_classes, dim_feedforward, nhead, dropout, activation)
         self.head_series = _get_clones(rcnn_head, num_heads)
         self.num_heads = num_heads
-        self.return_intermediate = cfg.MODEL.DiffusionInst.DEEP_SUPERVISION
+        self.return_intermediate = cfg.MODEL.ODVIS.DEEP_SUPERVISION
         
         #inst.
         #########################################
@@ -173,11 +173,11 @@ class DynamicHead(nn.Module):
         )
 
         # Init parameters.
-        self.use_focal = cfg.MODEL.DiffusionInst.USE_FOCAL
-        self.use_fed_loss = cfg.MODEL.DiffusionInst.USE_FED_LOSS
+        self.use_focal = cfg.MODEL.ODVIS.USE_FOCAL
+        self.use_fed_loss = cfg.MODEL.ODVIS.USE_FED_LOSS
         self.num_classes = num_classes
         if self.use_focal or self.use_fed_loss:
-            prior_prob = cfg.MODEL.DiffusionInst.PRIOR_PROB
+            prior_prob = cfg.MODEL.ODVIS.PRIOR_PROB
             self.bias_value = -math.log((1 - prior_prob) / prior_prob)
         self._reset_parameters()
 
@@ -297,7 +297,7 @@ class RCNNHead(nn.Module):
         self.block_time_mlp = nn.Sequential(nn.SiLU(), nn.Linear(d_model * 4, d_model * 2))
 
         # cls.
-        num_cls = cfg.MODEL.DiffusionInst.NUM_CLS
+        num_cls = cfg.MODEL.ODVIS.NUM_CLS
         cls_module = list()
         for _ in range(num_cls):
             cls_module.append(nn.Linear(d_model, d_model, False))
@@ -306,7 +306,7 @@ class RCNNHead(nn.Module):
         self.cls_module = nn.ModuleList(cls_module)
 
         # reg.
-        num_reg = cfg.MODEL.DiffusionInst.NUM_REG
+        num_reg = cfg.MODEL.ODVIS.NUM_REG
         reg_module = list()
         for _ in range(num_reg):
             reg_module.append(nn.Linear(d_model, d_model, False))
@@ -319,8 +319,8 @@ class RCNNHead(nn.Module):
         
         #########################################
         # pred.
-        self.use_focal = cfg.MODEL.DiffusionInst.USE_FOCAL
-        self.use_fed_loss = cfg.MODEL.DiffusionInst.USE_FED_LOSS
+        self.use_focal = cfg.MODEL.ODVIS.USE_FOCAL
+        self.use_fed_loss = cfg.MODEL.ODVIS.USE_FED_LOSS
         if self.use_focal or self.use_fed_loss:
             self.class_logits = nn.Linear(d_model, num_classes)
         else:
@@ -454,9 +454,9 @@ class DynamicConv(nn.Module):
     def __init__(self, cfg):
         super().__init__()
 
-        self.hidden_dim = cfg.MODEL.DiffusionInst.HIDDEN_DIM
-        self.dim_dynamic = cfg.MODEL.DiffusionInst.DIM_DYNAMIC
-        self.num_dynamic = cfg.MODEL.DiffusionInst.NUM_DYNAMIC
+        self.hidden_dim = cfg.MODEL.ODVIS.HIDDEN_DIM
+        self.dim_dynamic = cfg.MODEL.ODVIS.DIM_DYNAMIC
+        self.num_dynamic = cfg.MODEL.ODVIS.NUM_DYNAMIC
         self.num_params = self.hidden_dim * self.dim_dynamic
         self.dynamic_layer = nn.Linear(self.hidden_dim, self.num_dynamic * self.num_params)
 
