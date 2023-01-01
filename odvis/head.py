@@ -263,9 +263,9 @@ class DynamicHead(nn.Module):
             bboxes = pred_bboxes.detach()
 
         if self.return_intermediate:
-            return torch.stack(inter_class_logits), torch.stack(inter_pred_bboxes),torch.stack(inter_kernel), torch.stack(proposal_features), mask_feat
+            return torch.stack(inter_class_logits), torch.stack(inter_pred_bboxes),torch.stack(inter_kernel), proposal_features, mask_feat
 
-        return class_logits[None], pred_bboxes[None], inter_kernel[None], proposal_features[None], mask_feat
+        return class_logits[None], pred_bboxes[None], inter_kernel[None], proposal_features, mask_feat
 
 
 class RCNNHead(nn.Module):

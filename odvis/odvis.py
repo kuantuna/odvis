@@ -55,8 +55,15 @@ class ODVIS(nn.Module):
 
         self.in_features = cfg.MODEL.ROI_HEADS.IN_FEATURES
         self.num_classes = cfg.MODEL.ODVIS.NUM_CLASSES
+        self.num_proposals = cfg.MODEL.ODVIS.NUM_PROPOSALS
+        self.hidden_dim = cfg.MODEL.ODVIS.HIDDEN_DIM
+        self.num_heads = cfg.MODEL.ODVIS.NUM_HEADS
+        self.weight_nums = [64, 64, 8]
+        self.bias_nums = [8, 8, 1]
 
         self.backbone = build_backbone(cfg)
+        self.size_divisibility = self.backbone.size_divisibility
+
 
         # build diffusion
         timesteps = 1000
@@ -136,17 +143,17 @@ class ODVIS(nn.Module):
     
     def forward(self, batched_inputs):
         if self.training:
-            images, images_whwh = self.preprocess_image(batched_inputs)
+            key_images, ref_images, images_whwh = self.preprocess_image(batched_inputs)
             gt_instances = self.extract_gt_instances(batched_inputs)
             key_targets, ref_targets, diffused_boxes, _, t = self.prepare_targets(gt_instances)
             t = t.squeeze(-1)
             diffused_boxes = diffused_boxes * images_whwh[:, None, :]
 
-            # ?????
-            src = self.backbone(images.tensor)
-            features = [src[f] for f in self.features]
-            key_features, ref_features = self.divide_features(features)
-            # ????
+            key_src = self.backbone(key_images.tensor)
+            key_features = [key_src[f] for f in self.in_features]
+            
+            ref_src = self.backbone(ref_images.tensor)
+            ref_features = [ref_src[f] for f in self.in_features]
 
             outputs_class, outputs_coord, outputs_kernel, key_propsal_features, mask_feat = self.head(key_features, diffused_boxes, t, None, is_key=True)
             # _, _, _, ref_proposal_features, _ = self.head(ref_features, diffused_boxes, t, None, is_key=False)
@@ -154,8 +161,8 @@ class ODVIS(nn.Module):
             output = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1], 'pred_kernels': outputs_kernel[-1], 'mask_feat':mask_feat}
 
             if self.deep_supervision:
-                output['aux_outputs'] = [{'pred_logits': a, 'pred_boxes': b}
-                                         for a, b in zip(outputs_class[:-1], outputs_coord[:-1])]
+                output['aux_outputs'] = [{'pred_logits': a, 'pred_boxes': b, 'pred_kernels':c, 'mask_feat':mask_feat}
+                                         for a, b, c in zip(outputs_class[:-1], outputs_coord[:-1], outputs_kernel[:-1])]
 
             loss_dict = self.criterion(output, key_targets)
             weight_dict = self.criterion.weight_dict
@@ -194,11 +201,18 @@ class ODVIS(nn.Module):
         for video in batched_inputs:
             for frame in video["image"]:
                 h, w = frame.shape[-2:]
-                images_whwh.append(torch.tensor([w, h, w, h]), dtype=torch.float32, device=self.device)
-                images.append(self.normalizer(frame.to(self.device)))
-        images = ImageList.from_tensors(images)
+                images_whwh.append(torch.tensor([w, h, w, h], dtype=torch.float32, device=self.device))
+                images.append(self.normalizer(frame.to(self.device)))  
+        bz = len(images)//2
+        key_ids = list(range(0,bz*2-1,2)) # evens
+        ref_ids = list(range(1,bz*2,2))   # odds
+        key_images = [images[_i] for _i in key_ids] # some of the new_targets go here
+        ref_images = [images[_i] for _i in ref_ids] # some of the new_targets go here
+        key_images = ImageList.from_tensors(key_images, self.size_divisibility)
+        ref_images = ImageList.from_tensors(ref_images, self.size_divisibility)
+        images_whwh = [images_whwh[_i] for _i in key_ids]
         images_whwh = torch.stack(images_whwh)
-        return images, images_whwh
+        return key_images, ref_images, images_whwh
 
     def extract_gt_instances(self, batched_inputs):
         gt_instances = []
@@ -236,6 +250,7 @@ class ODVIS(nn.Module):
             target["boxes"] = gt_boxes.to(self.device)
             target["masks"] = gt_masks.to(self.device)
             target["boxes_xyxy"] = targets_per_image.gt_boxes.tensor.to(self.device)
+            target["image_size_xyxy"] = image_size_xyxy.to(self.device)
             image_size_xyxy_tgt = image_size_xyxy.unsqueeze(0).repeat(len(gt_boxes), 1)
             target["image_size_xyxy_tgt"] = image_size_xyxy_tgt.to(self.device)
             target["area"] = targets_per_image.gt_boxes.area().to(self.device)
@@ -255,9 +270,11 @@ class ODVIS(nn.Module):
             if False in det_target['valid']:
                 valid_i = det_target['valid'].clone()
                 for k,v in det_target.items():
-                    det_target[k] = v[valid_i]
+                    if k != "image_size_xyxy":
+                        det_target[k] = v[valid_i]
                 for k,v in ref_target.items():
-                    ref_target[k] = v[valid_i]
+                    if k != "image_size_xyxy":
+                        ref_target[k] = v[valid_i]
         return det_targets, ref_targets, torch.stack(diffused_boxes), torch.stack(noises), torch.stack(ts)
 
 
@@ -316,16 +333,16 @@ class ODVIS(nn.Module):
         ref_features = 2
         return key_features, ref_features
 
-class MLP(nn.Module):
-    """ Very simple multi-layer perceptron (also called FFN)"""
+# class MLP(nn.Module):
+#     """ Very simple multi-layer perceptron (also called FFN)"""
 
-    def __init__(self, input_dim, hidden_dim, output_dim, num_layers):
-        super().__init__()
-        self.num_layers = num_layers
-        h = [hidden_dim] * (num_layers - 1)
-        self.layers = nn.ModuleList(nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim]))
+#     def __init__(self, input_dim, hidden_dim, output_dim, num_layers):
+#         super().__init__()
+#         self.num_layers = num_layers
+#         h = [hidden_dim] * (num_layers - 1)
+#         self.layers = nn.ModuleList(nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim]))
 
-    def forward(self, x):
-        for i, layer in enumerate(self.layers):
-            x = F.relu(layer(x)) if i < self.num_layers - 1 else layer(x)
-        return x
+#     def forward(self, x):
+#         for i, layer in enumerate(self.layers):
+#             x = F.relu(layer(x)) if i < self.num_layers - 1 else layer(x)
+#         return x
