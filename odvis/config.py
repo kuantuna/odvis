@@ -32,10 +32,7 @@ def add_odvis_config(cfg):
     cfg.MODEL.ODVIS.FOCAL_ALPHA = 0.25
     cfg.MODEL.ODVIS.NO_OBJECT_WEIGHT = 0.1
 
-    cfg.MODEL.ODVIS.SET_COST_CLASS = 2
-    cfg.MODEL.ODVIS.SET_COST_BOX = 5
-    cfg.MODEL.ODVIS.SET_COST_GIOU = 2
-
+  
     # Focal Loss.
     cfg.MODEL.ODVIS.USE_FOCAL = True
     cfg.MODEL.ODVIS.USE_FED_LOSS = False

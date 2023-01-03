@@ -164,6 +164,9 @@ class ODVIS(nn.Module):
                 output['aux_outputs'] = [{'pred_logits': a, 'pred_boxes': b, 'pred_kernels':c, 'mask_feat':mask_feat}
                                          for a, b, c in zip(outputs_class[:-1], outputs_coord[:-1], outputs_kernel[:-1])]
 
+            outputs_without_aux = {k: v for k, v in output.items() if k != 'aux_outputs'}
+            _, matched_ids = self.criterion.matcher(outputs_without_aux, key_targets)
+
             loss_dict = self.criterion(output, key_targets)
             weight_dict = self.criterion.weight_dict
             for k in loss_dict.keys():
@@ -173,7 +176,7 @@ class ODVIS(nn.Module):
 
 
             """
-            select_pos_neg(, , ref_targets, key_targets, self.reid_embed_head, key_propsal_features[-1], ref_proposal_features[-1], )
+            select_pos_neg(, matched_ids, ref_targets, key_targets, self.reid_embed_head, key_propsal_features, ref_proposal_features, )
 
             f_mask = self.mask_branch(key_features)
             outputs_class, outputs_coord, outputs_kernel, k_out = self.decoder(key_features, diffused_boxes, t, None)

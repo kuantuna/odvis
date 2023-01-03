@@ -1,2 +1,6 @@
 __pycache__/
+.vscode/
 projects/
+ODVIS_YTVIS19_R50/
+datasets/
+models/
