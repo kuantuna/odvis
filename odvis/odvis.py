@@ -129,7 +129,7 @@ class ODVIS(nn.Module):
         matcher = HungarianMatcherDynamicK(
             cfg=cfg, cost_class=class_weight, cost_bbox=l1_weight, cost_giou=giou_weight, use_focal=self.use_focal
         )
-        losses = ["labels", "boxes", "mask"]
+        losses = ["labels", "boxes", "mask", "reid"]
         self.criterion = SetCriterionDynamicK(
             cfg=cfg, num_classes=self.num_classes, matcher=matcher, weight_dict=weight_dict, eos_coef=no_object_weight,
             losses=losses, use_focal=self.use_focal,)
@@ -138,7 +138,7 @@ class ODVIS(nn.Module):
         pixel_std = torch.Tensor(cfg.MODEL.PIXEL_STD).to(self.device).view(3, 1, 1)
         self.normalizer = lambda x: (x - pixel_mean) / pixel_std
 
-        # self.reid_embed_head = MLP(hidden_dim, hidden_dim, hidden_dim, 3)
+        self.reid_embed_head = MLP(self.hidden_dim, self.hidden_dim, self.hidden_dim, 3)
 
     
     def forward(self, batched_inputs):
@@ -156,7 +156,7 @@ class ODVIS(nn.Module):
             ref_features = [ref_src[f] for f in self.in_features]
 
             outputs_class, outputs_coord, outputs_kernel, key_propsal_features, mask_feat = self.head(key_features, diffused_boxes, t, None, is_key=True)
-            # _, _, _, ref_proposal_features, _ = self.head(ref_features, diffused_boxes, t, None, is_key=False)
+            _, _, _, ref_proposal_features, _ = self.head(ref_features, diffused_boxes, t, None, is_key=False)
 
             output = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1], 'pred_kernels': outputs_kernel[-1], 'mask_feat':mask_feat}
 
@@ -166,6 +166,10 @@ class ODVIS(nn.Module):
 
             outputs_without_aux = {k: v for k, v in output.items() if k != 'aux_outputs'}
             _, matched_ids = self.criterion.matcher(outputs_without_aux, key_targets)
+            ref_cls = self.head.head_series[-1].class_logits(ref_proposal_features).sigmoid()
+
+            contrast_items = select_pos_neg(outputs_coord[-1], matched_ids, ref_targets, key_targets, self.reid_embed_head, key_propsal_features, ref_proposal_features, ref_cls)
+            output['pred_qd'] = contrast_items
 
             loss_dict = self.criterion(output, key_targets)
             weight_dict = self.criterion.weight_dict
@@ -174,17 +178,6 @@ class ODVIS(nn.Module):
                     loss_dict[k] *= weight_dict[k]
             return loss_dict
 
-
-            """
-            select_pos_neg(, matched_ids, ref_targets, key_targets, self.reid_embed_head, key_propsal_features, ref_proposal_features, )
-
-            f_mask = self.mask_branch(key_features)
-            outputs_class, outputs_coord, outputs_kernel, k_out = self.decoder(key_features, diffused_boxes, t, None)
-            pred_masks = self.mask_head(outputs_kernel, f_mask)
-
-            r_out = self.decoder(ref_features, diffused_boxes, t, None)
-            self.contrastive_head(k_out, r_out)
-            """
             """
             if not self.training:
                 results = self.ddim_sample(batched_inputs, features, images_whwh, images)
@@ -336,16 +329,16 @@ class ODVIS(nn.Module):
         ref_features = 2
         return key_features, ref_features
 
-# class MLP(nn.Module):
-#     """ Very simple multi-layer perceptron (also called FFN)"""
+class MLP(nn.Module):
+    """ Very simple multi-layer perceptron (also called FFN)"""
 
-#     def __init__(self, input_dim, hidden_dim, output_dim, num_layers):
-#         super().__init__()
-#         self.num_layers = num_layers
-#         h = [hidden_dim] * (num_layers - 1)
-#         self.layers = nn.ModuleList(nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim]))
+    def __init__(self, input_dim, hidden_dim, output_dim, num_layers):
+        super().__init__()
+        self.num_layers = num_layers
+        h = [hidden_dim] * (num_layers - 1)
+        self.layers = nn.ModuleList(nn.Linear(n, k) for n, k in zip([input_dim] + h, h + [output_dim]))
 
-#     def forward(self, x):
-#         for i, layer in enumerate(self.layers):
-#             x = F.relu(layer(x)) if i < self.num_layers - 1 else layer(x)
-#         return x
+    def forward(self, x):
+        for i, layer in enumerate(self.layers):
+            x = F.relu(layer(x)) if i < self.num_layers - 1 else layer(x)
+        return x

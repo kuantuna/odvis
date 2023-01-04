@@ -383,6 +383,44 @@ class SetCriterionDynamicK(nn.Module):
             losses = {'loss_masks': outputs['pred_boxes'].sum() * 0}
 
         return losses
+
+    def loss_reid(self, outputs,  targets, ref_target, indices):
+
+        qd_items = outputs['pred_qd']
+        contras_loss = 0
+        aux_loss = 0
+        if len(qd_items) == 0:
+            losses = {'loss_reid': outputs['pred_logits'].sum()*0,
+                   'loss_reid_aux':  outputs['pred_logits'].sum()*0 }
+            return losses
+        for qd_item in qd_items:
+            pred = qd_item['contrast'].permute(1,0)
+            label = qd_item['label'].unsqueeze(0)
+            # contrastive loss
+            pos_inds = (label == 1)
+            neg_inds = (label == 0)
+            pred_pos = pred * pos_inds.float()
+            pred_neg = pred * neg_inds.float()
+            # use -inf to mask out unwanted elements.
+            pred_pos[neg_inds] = pred_pos[neg_inds] + float('inf')
+            pred_neg[pos_inds] = pred_neg[pos_inds] + float('-inf')
+
+            _pos_expand = torch.repeat_interleave(pred_pos, pred.shape[1], dim=1)
+            _neg_expand = pred_neg.repeat(1, pred.shape[1])
+            # [bz,N], N is all pos and negative samples on reference frame, label indicate it's pos or negative
+            x = torch.nn.functional.pad((_neg_expand - _pos_expand), (0, 1), "constant", 0) 
+            contras_loss += torch.logsumexp(x, dim=1)
+
+            aux_pred = qd_item['aux_consin'].permute(1,0)
+            aux_label = qd_item['aux_label'].unsqueeze(0)
+
+            aux_loss += (torch.abs(aux_pred - aux_label)**2).mean()
+
+
+        losses = {'loss_reid': contras_loss.sum()/len(qd_items),
+                   'loss_reid_aux':  aux_loss/len(qd_items) }
+
+        return losses
     
     def _get_src_permutation_idx(self, indices):
         # permute predictions following indices
@@ -401,6 +439,7 @@ class SetCriterionDynamicK(nn.Module):
             'labels': self.loss_labels,
             'boxes': self.loss_boxes,
             'mask': self.loss_masks,
+            'reid': self.loss_reid
         }
         assert loss in loss_map, f'do you really want to compute {loss} loss?'
         return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)
@@ -434,7 +473,7 @@ class SetCriterionDynamicK(nn.Module):
             for i, aux_outputs in enumerate(outputs['aux_outputs']):
                 indices, _ = self.matcher(aux_outputs, targets)
                 for loss in self.losses:
-                    if loss == 'masks' or loss == 'mask':
+                    if loss == 'masks' or loss == 'mask' or loss == 'reid':
                         # Intermediate masks losses are too costly to compute, we ignore them.
                         continue
                     kwargs = {}

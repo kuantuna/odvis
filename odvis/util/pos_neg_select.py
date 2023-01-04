@@ -7,7 +7,7 @@
 import torch
 import torch.nn as nn
 import torchvision
-from ..util.box_ops import box_cxcywh_to_xyxy, generalized_box_iou
+from ..util.box_ops import box_cxcywh_to_xyxy, box_xyxy_to_cxcywh, generalized_box_iou
 import random
 import torchvision.ops as ops
 def select_pos_neg(ref_box, all_indices, targets, det_targets, embed_head, hs_key, hs_ref, ref_cls):
@@ -22,7 +22,7 @@ def select_pos_neg(ref_box, all_indices, targets, det_targets, embed_head, hs_ke
     for bz_i,(v,detv, indices) in enumerate(zip(targets,det_targets,all_indices)):
         num_insts = len(v["labels"]) 
         # tgt_valid = v["valid"].reshape(num_insts)
-        tgt_bbox = v["boxes"].reshape(num_insts,4) 
+        tgt_bbox = v["boxes_xyxy"] # check the shape is it (n_inst, 4)?
         tgt_labels = v['labels']
         # tgt_valid = tgt_valid[:,1]    
         ref_box_bz = ref_box[bz_i]
@@ -36,7 +36,7 @@ def select_pos_neg(ref_box, all_indices, targets, det_targets, embed_head, hs_ke
             
             if not valid:  
                 continue
-            gt_box = tgt_bbox[inst_i].unsqueeze(0)
+            # gt_box = tgt_bbox[inst_i].unsqueeze(0)
             key_embed_i = key_embedds[bz_i,matched_query_id].unsqueeze(0)
 
             pos_embed = ref_embeds[bz_i][contrastive_pos[0][inst_i]]
@@ -76,8 +76,8 @@ def get_pos_idx(bz_boxes,bz_out_prob,bz_gtboxs,bz_tgt_ids,valid):
             bz_tgt_ids = bz_tgt_ids[valid]
 
         fg_mask, is_in_boxes_and_center  = \
-            get_in_boxes_info(bz_boxes,bz_gtboxs,expanded_strides=32)
-        pair_wise_ious = ops.box_iou(box_cxcywh_to_xyxy(bz_boxes), box_cxcywh_to_xyxy(bz_gtboxs))
+            get_in_boxes_info(box_xyxy_to_cxcywh(bz_boxes),box_xyxy_to_cxcywh(bz_gtboxs),expanded_strides=32)
+        pair_wise_ious = ops.box_iou(bz_boxes, bz_gtboxs)
         # pair_wise_ious_loss = -torch.log(pair_wise_ious + 1e-8)
         
         # Compute the classification cost.
@@ -86,7 +86,7 @@ def get_pos_idx(bz_boxes,bz_out_prob,bz_gtboxs,bz_tgt_ids,valid):
         neg_cost_class = (1 - alpha) * (bz_out_prob ** gamma) * (-(1 - bz_out_prob + 1e-8).log())
         pos_cost_class = alpha * ((1 - bz_out_prob) ** gamma) * (-(bz_out_prob + 1e-8).log())
         cost_class = pos_cost_class[:, bz_tgt_ids] - neg_cost_class[:, bz_tgt_ids]
-        cost_giou = -generalized_box_iou(box_cxcywh_to_xyxy(bz_boxes),  box_cxcywh_to_xyxy(bz_gtboxs))
+        cost_giou = -generalized_box_iou(bz_boxes,  bz_gtboxs)
 
         cost = ( cost_class + 3.0 * cost_giou + 100.0 * (~is_in_boxes_and_center) )
 
