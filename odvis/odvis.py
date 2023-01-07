@@ -2,19 +2,25 @@ import copy
 import math
 import random
 
+from collections import namedtuple
+
 import torch
 import torch.nn.functional as F
 from torch import nn
 
 from detectron2.modeling import META_ARCH_REGISTRY, build_backbone
-from detectron2.structures import ImageList, Boxes
+from detectron2.layers import batched_nms
+from detectron2.structures import ImageList, Boxes, Instances
 
 from .loss import SetCriterionDynamicK, HungarianMatcherDynamicK
+from .models.tracker import IDOL_Tracker
 from .head import DynamicHead
 from .util.box_ops import box_cxcywh_to_xyxy, box_xyxy_to_cxcywh
 from .util.pos_neg_select import select_pos_neg
 
 __all__ = ["ODVIS"]
+
+ModelPrediction = namedtuple('ModelPrediction', ['pred_noise', 'pred_x_start'])
 
 
 def cosine_beta_schedule(timesteps, s=0.008):
@@ -43,7 +49,155 @@ def default(val, d):
 def exists(x):
     return x is not None
 
+def clip_mask(Boxes,masks):
+    boxes = Boxes.tensor.long()
+    assert (len(boxes)==len(masks))
+    m_out = []
+    #import pdb;pdb.set_trace()
+    k = torch.zeros(masks[0].size()).long().to(boxes.device)
+    for i in range(len(masks)):
+        #import pdb;pdb.set_trace()
+        mask = masks[i]
+        box = boxes[i]
+        k[box[1]:box[3],box[0]:box[2]] = 1
+        mask *= k
+        m_out.append(mask)
+        k *= 0
+    return torch.stack(m_out)
 
+
+def parse_dynamic_params(params, channels, weight_nums, bias_nums):
+    assert params.dim() == 2
+    assert len(weight_nums) == len(bias_nums)
+    assert params.size(1) == sum(weight_nums) + sum(bias_nums)
+    num_instances = params.size(0)
+    num_layers = len(weight_nums)
+
+    params_splits = list(
+        torch.split_with_sizes(params, weight_nums + bias_nums, dim=1))
+
+    weight_splits = params_splits[:num_layers]
+    bias_splits = params_splits[num_layers:]
+
+    for l in range(num_layers):
+        if l < num_layers - 1:
+            # out_channels x in_channels x 1 x 1
+            weight_splits[l] = weight_splits[l].reshape(
+                num_instances * channels, -1, 1, 1)
+            bias_splits[l] = bias_splits[l].reshape(num_instances * channels)
+        else:
+            # out_channels x in_channels x 1 x 1
+            weight_splits[l] = weight_splits[l].reshape(
+                num_instances * 1, -1, 1, 1)
+            bias_splits[l] = bias_splits[l].reshape(num_instances)
+    return weight_splits, bias_splits
+
+
+def aligned_bilinear(tensor, factor):
+    assert tensor.dim() == 4
+    assert factor >= 1
+    assert int(factor) == factor
+    if factor == 1:
+        return tensor
+
+    h, w = tensor.size()[2:]
+    tensor = F.pad(tensor, pad=(0, 1, 0, 1), mode="replicate")
+    oh = factor * h + 1
+    ow = factor * w + 1
+    tensor = F.interpolate(tensor,
+                           size=(oh, ow),
+                           mode='bilinear',
+                           align_corners=True)
+    tensor = F.pad(tensor,
+                   pad=(factor // 2, 0, factor // 2, 0),
+                   mode="replicate")
+    return tensor[:, :, :oh - 1, :ow - 1]
+
+# perhaps should rename to "resize_instance"
+def detector_postprocess(
+    results: Instances, output_height: int, output_width: int, mid_size, mask_threshold: float = 0.5
+):
+    """
+    Resize the output instances.
+    The input images are often resized when entering an object detector.
+    As a result, we often need the outputs of the detector in a different
+    resolution from its inputs.
+    This function will resize the raw outputs of an R-CNN detector
+    to produce outputs according to the desired output resolution.
+    Args:
+        results (Instances): the raw outputs from the detector.
+            `results.image_size` contains the input image resolution the detector sees.
+            This object might be modified in-place.
+        output_height, output_width: the desired output resolution.
+    Returns:
+        Instances: the resized output from the model, based on the output resolution
+    """
+    if isinstance(output_width, torch.Tensor):
+        # This shape might (but not necessarily) be tensors during tracing.
+        # Converts integer tensors to float temporaries to ensure true
+        # division is performed when computing scale_x and scale_y.
+        output_width_tmp = output_width.float()
+        output_height_tmp = output_height.float()
+        new_size = torch.stack([output_height, output_width])
+    else:
+        new_size = (output_height, output_width)
+        output_width_tmp = output_width
+        output_height_tmp = output_height
+
+    scale_x, scale_y = (
+        output_width_tmp / results.image_size[1],
+        output_height_tmp / results.image_size[0],
+    )
+    results = Instances(new_size, **results.get_fields())
+
+    if results.has("pred_boxes"):
+        output_boxes = results.pred_boxes
+    elif results.has("proposal_boxes"):
+        output_boxes = results.proposal_boxes
+    else:
+        output_boxes = None
+    assert output_boxes is not None, "Predictions must contain boxes!"
+
+    output_boxes.scale(scale_x, scale_y)
+    #import pdb;pdb.set_trace()
+    output_boxes.clip(results.image_size)
+    masks = results.pred_masks
+    
+    #masks = F.interpolate(masks.unsqueeze(1), size=new_size, mode='bilinear').squeeze(1)
+    ################################################
+    
+    pred_global_masks = aligned_bilinear(masks.unsqueeze(1), 4)
+    #import pdb;pdb.set_trace()
+    pred_global_masks = pred_global_masks[:, :, :mid_size[0], :mid_size[1]]
+    masks = F.interpolate(
+                    pred_global_masks,
+                    size=(new_size[0], new_size[1]),
+                    mode='bilinear',
+                    align_corners=False).squeeze(1)
+    #################################################
+    masks.gt_(0.5)
+    #masks = masks.long()
+    #import pdb;pdb.set_trace()
+    masks = clip_mask(output_boxes,masks)
+    #import pdb;pdb.set_trace()
+    results.pred_masks = masks
+    results = results[output_boxes.nonempty()]
+    #import pdb;pdb.set_trace()
+    #if results.has("pred_masks"):
+        #if isinstance(results.pred_masks, ROIMasks):
+        #    roi_masks = results.pred_masks
+        #else:
+            # pred_masks is a tensor of shape (N, 1, M, M)
+        #    roi_masks = ROIMasks(results.pred_masks[:, 0, :, :])
+        #results.pred_masks = roi_masks.to_bitmasks(
+        #    results.pred_boxes, output_height, output_width, mask_threshold
+        #).tensor  # TODO return ROIMasks/BitMask object in the future
+
+    if results.has("pred_keypoints"):
+        results.pred_keypoints[:, :, 0] *= scale_x
+        results.pred_keypoints[:, :, 1] *= scale_y
+
+    return results
 
 @META_ARCH_REGISTRY.register()
 class ODVIS(nn.Module):
@@ -63,6 +217,8 @@ class ODVIS(nn.Module):
 
         self.backbone = build_backbone(cfg)
         self.size_divisibility = self.backbone.size_divisibility
+
+        self.batch_infer_len = cfg.MODEL.ODVIS.BATCH_INFER_LEN
 
 
         # build diffusion
@@ -84,6 +240,7 @@ class ODVIS(nn.Module):
         self.scale = cfg.MODEL.ODVIS.SNR_SCALE
         self.box_renewal = True
         self.use_ensemble = True
+        self.merge_on_cpu = cfg.MODEL.ODVIS.MERGE_ON_CPU
 
         self.register_buffer('betas', betas)
         self.register_buffer('alphas_cumprod', alphas_cumprod)
@@ -138,7 +295,32 @@ class ODVIS(nn.Module):
         pixel_std = torch.Tensor(cfg.MODEL.PIXEL_STD).to(self.device).view(3, 1, 1)
         self.normalizer = lambda x: (x - pixel_mean) / pixel_std
 
+        self.merge_device = "cpu" if self.merge_on_cpu else self.device
         self.reid_embed_head = MLP(self.hidden_dim, self.hidden_dim, self.hidden_dim, 3)
+
+    def predict_noise_from_start(self, x_t, t, x0):
+        return (
+                (extract(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t - x0) /
+                extract(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape)
+        )
+
+    def model_predictions(self, backbone_feats, images_whwh, x, t, x_self_cond=None, clip_x_start=False):
+        x_boxes = torch.clamp(x, min=-1 * self.scale, max=self.scale)
+        x_boxes = ((x_boxes / self.scale) + 1) / 2
+        x_boxes = box_cxcywh_to_xyxy(x_boxes)
+        x_boxes = x_boxes * images_whwh[:, None, :]
+        outputs_class, outputs_coord, outputs_kernel, proposal_features, mask_feat = self.head(backbone_feats, x_boxes, t, None, True)
+        outputs_inst_embed = self.reid_embed_head(proposal_features) #problem on inst_embed fix
+        
+        #torch.Size([6, 1, 500, 80]), torch.Size([6, 1, 500, 153]), torch.Size([1, 8, 200, 304])
+        x_start = outputs_coord[-1]  # (batch, num_proposals, 4) predict boxes: absolute coordinates (x1, y1, x2, y2)
+        x_start = x_start / images_whwh[:, None, :]
+        x_start = box_xyxy_to_cxcywh(x_start)
+        x_start = (x_start * 2 - 1.) * self.scale
+        x_start = torch.clamp(x_start, min=-1 * self.scale, max=self.scale)
+        pred_noise = self.predict_noise_from_start(x, t, x_start)
+
+        return ModelPrediction(pred_noise, x_start), outputs_class, outputs_coord, outputs_kernel, mask_feat, outputs_inst_embed
 
     
     def forward(self, batched_inputs):
@@ -178,13 +360,263 @@ class ODVIS(nn.Module):
                     loss_dict[k] *= weight_dict[k]
             return loss_dict
 
-            """
-            if not self.training:
-                results = self.ddim_sample(batched_inputs, features, images_whwh, images)
-                return results
-            """
+        else:
+            video_len = len(batched_inputs[0]['file_names'])
+            clip_length = self.batch_infer_len
+            #split long video into clips to form a batch input 
+            if video_len > clip_length:
+                num_clips = math.ceil(video_len/clip_length)
+                logits_list, boxes_list, embed_list, masks_list, kernels_list, mask_feat_list = [], [], [], [], [], []
+                for c in range(num_clips):
+                    start_idx = c*clip_length
+                    end_idx = (c+1)*clip_length
+                    clip_inputs = [{'image':batched_inputs[0]['image'][start_idx:end_idx]}]
+                    clip_images, images_whwh, _ = self.preprocess_image(clip_inputs)
+                    src = self.backbone(clip_images.tensor)
+                    features = [src[f] for f in self.in_features]
+                    clip_output = self.inference_forward(features, images_whwh)
+                    logits_list.append(clip_output['pred_logits'])
+                    boxes_list.append(clip_output['pred_boxes'])
+                    embed_list.append(clip_output['pred_inst_embed'])
+                    masks_list.append(clip_output['pred_masks'].to(self.merge_device))
+                    kernels_list.append(clip_output['pred_kernels'])
+                    mask_feat_list.append(clip_output['mask_feat'])
+                output = {
+                    'pred_logits':torch.cat(logits_list,dim=0),
+                    'pred_boxes':torch.cat(boxes_list,dim=0),
+                    'pred_inst_embed':torch.cat(embed_list,dim=0),
+                    'pred_masks':torch.cat(masks_list,dim=0),
+                    'pred_kernels':torch.cat(kernels_list,dim=0),
+                    'mask_feat':torch.cat(mask_feat_list,dim=0),
+                }    
+
+            else:
+                images, images_whwh, _ = self.preprocess_image(batched_inputs)
+                src = self.backbone(images.tensor)
+                features = [src[f] for f in self.in_features]
+                output = self.inference_forward(features, images_whwh)
+
+            idol_tracker = IDOL_Tracker(
+                    init_score_thr= 0.2,
+                    obj_score_thr=0.1,
+                    nms_thr_pre=self.nms_pre,  #0.5
+                    nms_thr_post=0.05,
+                    addnew_score_thr = self.add_new_score, #0.2
+                    memo_tracklet_frames = 10,
+                    memo_momentum = 0.8,
+                    long_match = self.inference_tw,
+                    frame_weight = (self.inference_tw|self.inference_fw),
+                    temporal_weight = self.inference_tw,
+                    memory_len = self.memory_len
+                    )
+        
+            height = batched_inputs[0]['height']
+            width = batched_inputs[0]['width']
+            video_output = self.inference(output, idol_tracker, (height, width), images.image_sizes[0])  # (height, width) is resized size,images. image_sizes[0] is original size
+
+            return video_output
 
 
+    def inference_forward(self, backbone_feats, images_whwh, clip_denoised=True, do_postprocess=True):
+        batch = images_whwh.shape[0]
+        shape = (batch, self.num_proposals, 4)
+        total_timesteps, sampling_timesteps, eta, objective = self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective
+        # [-1, 0, 1, 2, ..., T-1] when sampling_timesteps == total_timesteps
+        times = torch.linspace(-1, total_timesteps - 1, steps=sampling_timesteps + 1)
+        #tensor([ -1., 999.])
+        times = list(reversed(times.int().tolist()))
+        
+        time_pairs = list(zip(times[:-1], times[1:]))  # [(T-1, T-2), (T-2, T-3), ..., (1, 0), (0, -1)]
+
+        img = torch.randn(shape, device=self.device)
+        x_start = None
+        for time, time_next in time_pairs:
+            time_cond = torch.full((batch,), time, device=self.device, dtype=torch.long)
+            self_cond = x_start if self.self_condition else None
+            preds, outputs_class, outputs_coord, outputs_kernel, mask_feat, outputs_inst_embed = self.model_predictions(backbone_feats, images_whwh, img, time_cond,self_cond, clip_x_start=clip_denoised)
+            pred_noise, x_start = preds.pred_noise, preds.pred_x_start
+
+            if self.box_renewal:  # filter
+                #true
+                score_per_image = outputs_class[-1][0]
+                threshold = 0.5
+                score_per_image = torch.sigmoid(score_per_image)
+                value, _ = torch.max(score_per_image, -1, keepdim=False)
+                keep_idx = value > threshold
+                num_remain = torch.sum(keep_idx)
+
+                pred_noise = pred_noise[:, keep_idx, :]
+                x_start = x_start[:, keep_idx, :]
+                img = img[:, keep_idx, :]
+            if time_next < 0:
+                img = x_start
+                continue
+
+            alpha = self.alphas_cumprod[time]
+            alpha_next = self.alphas_cumprod[time_next]
+
+            sigma = eta * ((1 - alpha / alpha_next) * (1 - alpha_next) / (1 - alpha)).sqrt()
+            c = (1 - alpha_next - sigma ** 2).sqrt()
+
+            noise = torch.randn_like(img)
+
+            img = x_start * alpha_next.sqrt() + \
+                  c * pred_noise + \
+                  sigma * noise
+
+            if self.box_renewal:  # filter
+                # replenish with randn boxes
+                img = torch.cat((img, torch.randn(1, self.num_proposals - num_remain, 4, device=img.device)), dim=1)
+        
+        return {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1], 'pred_masks': None, 'pred_inst_embed': outputs_inst_embed, 'pred_kernels': outputs_kernel[-1], 'mask_feat': mask_feat}
+            
+    def inference(self, outputs, tracker, ori_size, image_sizes):
+        """
+        Arguments:
+            box_cls (Tensor): tensor of shape (batch_size, num_queries, K).
+                The tensor predicts the classification probability for each query.
+            box_pred (Tensor): tensors of shape (batch_size, num_queries, 4).
+                The tensor predicts 4-vector (x,y,w,h) box
+                regression values for every queryx
+            image_sizes (List[torch.Size]): the input image sizes
+
+        Returns:
+            results (List[Instances]): a list of #images elements.
+        """
+        # results = []
+        video_dict = {}
+        vido_logits = outputs['pred_logits']
+        video_output_masks = outputs['pred_masks']
+        output_h, output_w = video_output_masks.shape[-2:]
+        video_output_boxes = outputs['pred_boxes']
+        video_output_embeds = outputs['pred_inst_embed']
+        vid_len = len(vido_logits)
+        for i_frame, (logits, output_mask, output_boxes, output_embed) in enumerate(zip(
+            vido_logits, video_output_masks, video_output_boxes, video_output_embeds
+         )):
+            scores = logits.sigmoid().cpu().detach()  #[300,42]
+            max_score, _ = torch.max(logits.sigmoid(),1)
+            indices = torch.nonzero(max_score>self.inference_select_thres, as_tuple=False).squeeze(1)
+            if len(indices) == 0:
+                topkv, indices_top1 = torch.topk(scores.max(1)[0],k=1)
+                indices_top1 = indices_top1[torch.argmax(topkv)]
+                indices = [indices_top1.tolist()]
+            else:
+                nms_scores,idxs = torch.max(logits.sigmoid()[indices],1)
+                boxes_before_nms = box_cxcywh_to_xyxy(output_boxes[indices])
+                keep_indices = batched_nms(boxes_before_nms,nms_scores,idxs,0.9)#.tolist()
+                indices = indices[keep_indices]
+            box_score = torch.max(logits.sigmoid()[indices],1)[0]
+            det_bboxes = torch.cat([output_boxes[indices],box_score.unsqueeze(1)],dim=1)
+            det_labels = torch.argmax(logits.sigmoid()[indices],dim=1)
+            track_feats = output_embed[indices]
+            det_masks = output_mask[indices]
+            bboxes, labels, ids, indices = tracker.match(
+                bboxes=det_bboxes,
+                labels=det_labels,
+                masks = det_masks,
+                track_feats=track_feats,
+                frame_id=i_frame,
+                indices = indices
+                )
+            indices = torch.tensor(indices)[ids>-1].tolist()
+            ids = ids[ids > -1]
+            ids = ids.tolist()
+            for query_i, id in zip(indices,ids):
+                if id in video_dict.keys():
+                    video_dict[id]['masks'].append(output_mask[query_i])
+                    video_dict[id]['boxes'].append(output_boxes[query_i])
+                    video_dict[id]['scores'].append(scores[query_i])
+                    video_dict[id]['valid'] = video_dict[id]['valid'] + 1
+                else:
+                    video_dict[id] = {
+                        'masks':[None for fi in range(i_frame)], 
+                        'boxes':[None for fi in range(i_frame)], 
+                        'scores':[None for fi in range(i_frame)], 
+                        'valid':0}
+                    video_dict[id]['masks'].append(output_mask[query_i])
+                    video_dict[id]['boxes'].append(output_boxes[query_i])
+                    video_dict[id]['scores'].append(scores[query_i])
+                    video_dict[id]['valid'] = video_dict[id]['valid'] + 1
+
+            for k,v in video_dict.items():
+                if len(v['masks'])<i_frame+1: #padding None for unmatched ID
+                    v['masks'].append(None)
+                    v['scores'].append(None)
+                    v['boxes'].append(None)
+            check_len = [len(v['masks']) for k,v in video_dict.items()]
+            # print('check_len',check_len)
+
+            #  filtering sequences that are too short in video_dict (noise)，the rule is: if the first two frames are None and valid is less than 3
+            if i_frame>8:
+                del_list = []
+                for k,v in video_dict.items():
+                    if v['masks'][-1] is None and  v['masks'][-2] is None and v['valid']<3:
+                        del_list.append(k)   
+                for del_k in del_list:
+                    video_dict.pop(del_k)                      
+
+        del outputs
+        logits_list = []
+        masks_list = []
+
+        for inst_id,m in  enumerate(video_dict.keys()):
+            score_list_ori = video_dict[m]['scores']
+            scores_temporal = []
+            for k in score_list_ori:
+                if k is not None:
+                    scores_temporal.append(k)
+            logits_i = torch.stack(scores_temporal)
+            if self.temporal_score_type == 'mean':
+                logits_i = logits_i.mean(0)
+            elif self.temporal_score_type == 'max':
+                logits_i = logits_i.max(0)[0]
+            else:
+                print('non valid temporal_score_type')
+                import sys;sys.exit(0)
+            logits_list.append(logits_i)
+            
+            # category_id = np.argmax(logits_i.mean(0))
+            masks_list_i = []
+            for n in range(vid_len):
+                mask_i = video_dict[m]['masks'][n]
+                if mask_i is None:    
+                    zero_mask = None # padding None instead of zero mask to save memory
+                    masks_list_i.append(zero_mask)
+                else:
+                    pred_mask_i =F.interpolate(mask_i[:,None,:,:],  size=(output_h*4, output_w*4) ,mode="bilinear", align_corners=False).sigmoid()
+                    pred_mask_i = pred_mask_i[:,:,:image_sizes[0],:image_sizes[1]] #crop the padding area
+                    pred_mask_i = (F.interpolate(pred_mask_i, size=(ori_size[0], ori_size[1]), mode='nearest')>0.5)[0,0].cpu() # resize to ori video size
+                    masks_list_i.append(pred_mask_i)
+            masks_list.append(masks_list_i)
+        if len(logits_list)>0:
+            pred_cls = torch.stack(logits_list)
+        else:
+            pred_cls = []
+
+        if len(pred_cls) > 0:
+            if self.is_multi_cls:
+                is_above_thres = torch.where(pred_cls > self.apply_cls_thres)
+                scores = pred_cls[is_above_thres]
+                labels = is_above_thres[1]
+                out_masks = [masks_list[valid_id] for valid_id in is_above_thres[0]]
+            else:
+                scores, labels = pred_cls.max(-1)
+                out_masks = masks_list
+            out_scores = scores.tolist()
+            out_labels = labels.tolist()
+        else:
+            out_scores = []
+            out_labels = []
+            out_masks = []
+        video_output = {
+            "image_size": ori_size,
+            "pred_scores": out_scores,
+            "pred_labels": out_labels,
+            "pred_masks": out_masks,
+        }
+
+        return video_output
 
 
 
@@ -199,16 +631,21 @@ class ODVIS(nn.Module):
                 h, w = frame.shape[-2:]
                 images_whwh.append(torch.tensor([w, h, w, h], dtype=torch.float32, device=self.device))
                 images.append(self.normalizer(frame.to(self.device)))  
-        bz = len(images)//2
-        key_ids = list(range(0,bz*2-1,2)) # evens
-        ref_ids = list(range(1,bz*2,2))   # odds
-        key_images = [images[_i] for _i in key_ids] # some of the new_targets go here
-        ref_images = [images[_i] for _i in ref_ids] # some of the new_targets go here
-        key_images = ImageList.from_tensors(key_images, self.size_divisibility)
-        ref_images = ImageList.from_tensors(ref_images, self.size_divisibility)
-        images_whwh = [images_whwh[_i] for _i in key_ids]
-        images_whwh = torch.stack(images_whwh)
-        return key_images, ref_images, images_whwh
+        if self.training:
+            bz = len(images)//2
+            key_ids = list(range(0,bz*2-1,2)) # evens
+            ref_ids = list(range(1,bz*2,2))   # odds
+            key_images = [images[_i] for _i in key_ids] # some of the new_targets go here
+            ref_images = [images[_i] for _i in ref_ids] # some of the new_targets go here
+            key_images = ImageList.from_tensors(key_images, self.size_divisibility)
+            ref_images = ImageList.from_tensors(ref_images, self.size_divisibility)
+            images_whwh = [images_whwh[_i] for _i in key_ids]
+            images_whwh = torch.stack(images_whwh)
+            return key_images, ref_images, images_whwh
+        else:
+            images = ImageList.from_tensors(images, self.size_divisibility)
+            images_whwh = torch.stack(images_whwh)
+            return images, images_whwh, None
 
     def extract_gt_instances(self, batched_inputs):
         gt_instances = []
@@ -273,6 +710,27 @@ class ODVIS(nn.Module):
                         ref_target[k] = v[valid_i]
         return det_targets, ref_targets, torch.stack(diffused_boxes), torch.stack(noises), torch.stack(ts)
 
+
+    def mask_heads_forward(self, features, weights, biases, num_instances):
+        '''
+        :param features
+        :param weights: [w0, w1, ...]
+        :param bias: [b0, b1, ...]
+        :return:
+        '''
+        assert features.dim() == 4
+        n_layers = len(weights)
+        x = features
+        for i, (w, b) in enumerate(zip(weights, biases)):
+            x = F.conv2d(x,
+                        w,
+                        bias=b,
+                        stride=1,
+                        padding=0,
+                        groups=num_instances)
+            if i < n_layers - 1:
+                x = F.relu(x)
+        return x
 
     def prepare_diffusion_concat(self, gt_boxes):
         """

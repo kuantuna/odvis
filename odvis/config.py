@@ -45,7 +45,7 @@ def add_odvis_config(cfg):
 
     # Diffusion
     cfg.MODEL.ODVIS.SNR_SCALE = 2.0
-    cfg.MODEL.ODVIS.SAMPLE_STEP = 1
+    cfg.MODEL.ODVIS.SAMPLE_STEP = 1 #4 
 
     # Inference
     cfg.MODEL.ODVIS.USE_NMS = True
