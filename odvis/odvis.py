@@ -218,6 +218,15 @@ class ODVIS(nn.Module):
         self.backbone = build_backbone(cfg)
         self.size_divisibility = self.backbone.size_divisibility
 
+        self.is_multi_cls = cfg.MODEL.ODVIS.MULTI_CLS_ON
+        self.apply_cls_thres = cfg.MODEL.ODVIS.APPLY_CLS_THRES
+        self.temporal_score_type = cfg.MODEL.ODVIS.TEMPORAL_SCORE_TYPE
+        self.inference_select_thres = cfg.MODEL.ODVIS.INFERENCE_SELECT_THRES
+        self.inference_fw = cfg.MODEL.ODVIS.INFERENCE_FW
+        self.inference_tw = cfg.MODEL.ODVIS.INFERENCE_TW
+        self.memory_len = cfg.MODEL.ODVIS.MEMORY_LEN
+        self.nms_pre = cfg.MODEL.ODVIS.NMS_PRE
+        self.add_new_score = cfg.MODEL.ODVIS.ADD_NEW_SCORE 
         self.batch_infer_len = cfg.MODEL.ODVIS.BATCH_INFER_LEN
 
 
@@ -361,6 +370,7 @@ class ODVIS(nn.Module):
             return loss_dict
 
         else:
+            images, _, _ = self.preprocess_image(batched_inputs)
             video_len = len(batched_inputs[0]['file_names'])
             clip_length = self.batch_infer_len
             #split long video into clips to form a batch input 
@@ -378,14 +388,14 @@ class ODVIS(nn.Module):
                     logits_list.append(clip_output['pred_logits'])
                     boxes_list.append(clip_output['pred_boxes'])
                     embed_list.append(clip_output['pred_inst_embed'])
-                    masks_list.append(clip_output['pred_masks'].to(self.merge_device))
+                    # masks_list.append(clip_output['pred_masks'].to(self.merge_device))
                     kernels_list.append(clip_output['pred_kernels'])
                     mask_feat_list.append(clip_output['mask_feat'])
                 output = {
                     'pred_logits':torch.cat(logits_list,dim=0),
                     'pred_boxes':torch.cat(boxes_list,dim=0),
                     'pred_inst_embed':torch.cat(embed_list,dim=0),
-                    'pred_masks':torch.cat(masks_list,dim=0),
+                    # 'pred_masks':torch.cat(masks_list,dim=0),
                     'pred_kernels':torch.cat(kernels_list,dim=0),
                     'mask_feat':torch.cat(mask_feat_list,dim=0),
                 }    
@@ -468,7 +478,7 @@ class ODVIS(nn.Module):
                 # replenish with randn boxes
                 img = torch.cat((img, torch.randn(1, self.num_proposals - num_remain, 4, device=img.device)), dim=1)
         
-        return {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1], 'pred_masks': None, 'pred_inst_embed': outputs_inst_embed, 'pred_kernels': outputs_kernel[-1], 'mask_feat': mask_feat}
+        return {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1], 'pred_inst_embed': outputs_inst_embed, 'pred_kernels': outputs_kernel[-1], 'mask_feat': mask_feat}
             
     def inference(self, outputs, tracker, ori_size, image_sizes):
         """
@@ -486,17 +496,19 @@ class ODVIS(nn.Module):
         # results = []
         video_dict = {}
         vido_logits = outputs['pred_logits']
-        video_output_masks = outputs['pred_masks']
-        output_h, output_w = video_output_masks.shape[-2:]
+        # video_output_masks = outputs['pred_masks']
+        pred_kernels = outputs['pred_kernels']
+        mask_feat = outputs['mask_feat']
+        output_h, output_w = mask_feat.shape[-2:]
         video_output_boxes = outputs['pred_boxes']
         video_output_embeds = outputs['pred_inst_embed']
         vid_len = len(vido_logits)
-        for i_frame, (logits, output_mask, output_boxes, output_embed) in enumerate(zip(
-            vido_logits, video_output_masks, video_output_boxes, video_output_embeds
+        for i_frame, (logits, kernel, output_boxes, output_embed, mas) in enumerate(zip(
+            vido_logits, pred_kernels, video_output_boxes, video_output_embeds, mask_feat
          )):
-            scores = logits.sigmoid().cpu().detach()  #[300,42]
-            max_score, _ = torch.max(logits.sigmoid(),1)
-            indices = torch.nonzero(max_score>self.inference_select_thres, as_tuple=False).squeeze(1)
+            scores = logits.sigmoid().cpu().detach()  #[500, 40]
+            max_score, _ = torch.max(logits.sigmoid(),1) #[500]
+            indices = torch.nonzero(max_score>self.inference_select_thres, as_tuple=False).squeeze(1)#[x]
             if len(indices) == 0:
                 topkv, indices_top1 = torch.topk(scores.max(1)[0],k=1)
                 indices_top1 = indices_top1[torch.argmax(topkv)]
@@ -506,11 +518,26 @@ class ODVIS(nn.Module):
                 boxes_before_nms = box_cxcywh_to_xyxy(output_boxes[indices])
                 keep_indices = batched_nms(boxes_before_nms,nms_scores,idxs,0.9)#.tolist()
                 indices = indices[keep_indices]
-            box_score = torch.max(logits.sigmoid()[indices],1)[0]
+            box_score = torch.max(logits.sigmoid()[indices],1)[0] #[x] or [1]
             det_bboxes = torch.cat([output_boxes[indices],box_score.unsqueeze(1)],dim=1)
             det_labels = torch.argmax(logits.sigmoid()[indices],dim=1)
             track_feats = output_embed[indices]
-            det_masks = output_mask[indices]
+
+            num_instance = len(kernel)
+            weights, biases = parse_dynamic_params(
+                kernel, #[500, 153]
+                8,
+                self.weight_nums,
+                self.bias_nums)
+            mask_feat_head = mas.unsqueeze(0).repeat(1, num_instance, 1, 1) #[1, 4000, 120, 216]
+            mask_logits = self.mask_heads_forward( #[1, 500, 120, 216]
+                mask_feat_head, 
+                weights, 
+                biases, 
+                num_instance)
+            output_mask = mask_logits.reshape(-1, 1, mas.size(1), mas.size(2)) #[500, 1, 120, 216]
+            det_masks = output_mask[indices] # 
+
             bboxes, labels, ids, indices = tracker.match(
                 bboxes=det_bboxes,
                 labels=det_labels,
