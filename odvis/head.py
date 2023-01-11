@@ -406,7 +406,7 @@ class RCNNHead(nn.Module):
         #import pdb;pdb.set_trace()
         pred_bboxes = self.apply_deltas(bboxes_deltas, bboxes.view(-1, 4))
         
-        return class_logits.view(N, nr_boxes, -1), pred_bboxes.view(N, nr_boxes, -1), obj_features.reshape(N, nr_boxes, self.d_model), kernel_pred.view(N, nr_boxes, -1)
+        return class_logits.view(N, nr_boxes, -1), pred_bboxes.view(N, nr_boxes, -1), obj_features.view(N, nr_boxes, -1), kernel_pred.view(N, nr_boxes, -1)
 
     def apply_deltas(self, deltas, boxes):
         """

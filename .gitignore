@@ -3,4 +3,5 @@ __pycache__/
 projects/
 ODVIS_YTVIS19_R50/
 datasets/
+output/
 models/

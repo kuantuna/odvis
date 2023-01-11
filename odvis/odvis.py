@@ -53,10 +53,8 @@ def clip_mask(Boxes,masks):
     boxes = Boxes.tensor.long()
     assert (len(boxes)==len(masks))
     m_out = []
-    #import pdb;pdb.set_trace()
     k = torch.zeros(masks[0].size()).long().to(boxes.device)
     for i in range(len(masks)):
-        #import pdb;pdb.set_trace()
         mask = masks[i]
         box = boxes[i]
         k[box[1]:box[3],box[0]:box[2]] = 1
@@ -113,91 +111,6 @@ def aligned_bilinear(tensor, factor):
                    mode="replicate")
     return tensor[:, :, :oh - 1, :ow - 1]
 
-# perhaps should rename to "resize_instance"
-def detector_postprocess(
-    results: Instances, output_height: int, output_width: int, mid_size, mask_threshold: float = 0.5
-):
-    """
-    Resize the output instances.
-    The input images are often resized when entering an object detector.
-    As a result, we often need the outputs of the detector in a different
-    resolution from its inputs.
-    This function will resize the raw outputs of an R-CNN detector
-    to produce outputs according to the desired output resolution.
-    Args:
-        results (Instances): the raw outputs from the detector.
-            `results.image_size` contains the input image resolution the detector sees.
-            This object might be modified in-place.
-        output_height, output_width: the desired output resolution.
-    Returns:
-        Instances: the resized output from the model, based on the output resolution
-    """
-    if isinstance(output_width, torch.Tensor):
-        # This shape might (but not necessarily) be tensors during tracing.
-        # Converts integer tensors to float temporaries to ensure true
-        # division is performed when computing scale_x and scale_y.
-        output_width_tmp = output_width.float()
-        output_height_tmp = output_height.float()
-        new_size = torch.stack([output_height, output_width])
-    else:
-        new_size = (output_height, output_width)
-        output_width_tmp = output_width
-        output_height_tmp = output_height
-
-    scale_x, scale_y = (
-        output_width_tmp / results.image_size[1],
-        output_height_tmp / results.image_size[0],
-    )
-    results = Instances(new_size, **results.get_fields())
-
-    if results.has("pred_boxes"):
-        output_boxes = results.pred_boxes
-    elif results.has("proposal_boxes"):
-        output_boxes = results.proposal_boxes
-    else:
-        output_boxes = None
-    assert output_boxes is not None, "Predictions must contain boxes!"
-
-    output_boxes.scale(scale_x, scale_y)
-    #import pdb;pdb.set_trace()
-    output_boxes.clip(results.image_size)
-    masks = results.pred_masks
-    
-    #masks = F.interpolate(masks.unsqueeze(1), size=new_size, mode='bilinear').squeeze(1)
-    ################################################
-    
-    pred_global_masks = aligned_bilinear(masks.unsqueeze(1), 4)
-    #import pdb;pdb.set_trace()
-    pred_global_masks = pred_global_masks[:, :, :mid_size[0], :mid_size[1]]
-    masks = F.interpolate(
-                    pred_global_masks,
-                    size=(new_size[0], new_size[1]),
-                    mode='bilinear',
-                    align_corners=False).squeeze(1)
-    #################################################
-    masks.gt_(0.5)
-    #masks = masks.long()
-    #import pdb;pdb.set_trace()
-    masks = clip_mask(output_boxes,masks)
-    #import pdb;pdb.set_trace()
-    results.pred_masks = masks
-    results = results[output_boxes.nonempty()]
-    #import pdb;pdb.set_trace()
-    #if results.has("pred_masks"):
-        #if isinstance(results.pred_masks, ROIMasks):
-        #    roi_masks = results.pred_masks
-        #else:
-            # pred_masks is a tensor of shape (N, 1, M, M)
-        #    roi_masks = ROIMasks(results.pred_masks[:, 0, :, :])
-        #results.pred_masks = roi_masks.to_bitmasks(
-        #    results.pred_boxes, output_height, output_width, mask_threshold
-        #).tensor  # TODO return ROIMasks/BitMask object in the future
-
-    if results.has("pred_keypoints"):
-        results.pred_keypoints[:, :, 0] *= scale_x
-        results.pred_keypoints[:, :, 1] *= scale_y
-
-    return results
 
 @META_ARCH_REGISTRY.register()
 class ODVIS(nn.Module):
@@ -476,7 +389,7 @@ class ODVIS(nn.Module):
 
             if self.box_renewal:  # filter
                 # replenish with randn boxes
-                img = torch.cat((img, torch.randn(1, self.num_proposals - num_remain, 4, device=img.device)), dim=1)
+                img = torch.cat((img, torch.randn(batch, self.num_proposals - num_remain, 4, device=img.device)), dim=1)
         
         return {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1], 'pred_inst_embed': outputs_inst_embed, 'pred_kernels': outputs_kernel[-1], 'mask_feat': mask_feat}
             
@@ -805,14 +718,6 @@ class ODVIS(nn.Module):
 
         return sqrt_alphas_cumprod_t * x_start + sqrt_one_minus_alphas_cumprod_t * noise
 
-
-    def divide_features(self, features):
-        """
-        Fix this later!
-        """
-        key_features = 1
-        ref_features = 2
-        return key_features, ref_features
 
 class MLP(nn.Module):
     """ Very simple multi-layer perceptron (also called FFN)"""
