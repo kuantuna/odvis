@@ -2,6 +2,7 @@ __pycache__/
 .vscode/
 projects/
 ODVIS_YTVIS19_R50/
+ODVIS_prerain_oncoco_r50_twocrop/
 datasets/
 output/
 models/

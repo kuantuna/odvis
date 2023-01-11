@@ -142,6 +142,10 @@ class ODVIS(nn.Module):
         self.add_new_score = cfg.MODEL.ODVIS.ADD_NEW_SCORE 
         self.batch_infer_len = cfg.MODEL.ODVIS.BATCH_INFER_LEN
 
+        self.mask_on = cfg.MODEL.MASK_ON
+
+        self.coco_pretrain = cfg.INPUT.COCO_PRETRAIN
+
 
         # build diffusion
         timesteps = 1000
@@ -282,6 +286,24 @@ class ODVIS(nn.Module):
                     loss_dict[k] *= weight_dict[k]
             return loss_dict
 
+        elif self.coco_pretrain:
+            images, images_whwh = self.preprocess_coco_image(batched_inputs)
+            src = self.backbone(images.tensor)
+            features = [src[f] for f in self.in_features]
+            output = self.inference_forward(features, images_whwh)
+            box_cls = output["pred_logits"]
+            box_pred = output["pred_boxes"]
+            kernel_pred = output["pred_kernels"]
+            mask_feat = output["mask_feat"]
+            results = self.coco_inference(box_cls, box_pred, kernel_pred, mask_feat, images.image_sizes)
+            processed_results = []
+            for results_per_image, input_per_image, image_size in zip(results, batched_inputs, images.image_sizes):
+                height = input_per_image.get("height", image_size[0])
+                width = input_per_image.get("width", image_size[1])
+                r = segmentation_postprocess(results_per_image, height, width)
+                processed_results.append({"instances": r})
+            return processed_results
+
         else:
             images, _, _ = self.preprocess_image(batched_inputs)
             video_len = len(batched_inputs[0]['file_names'])
@@ -393,6 +415,67 @@ class ODVIS(nn.Module):
         
         return {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1], 'pred_inst_embed': outputs_inst_embed, 'pred_kernels': outputs_kernel[-1], 'mask_feat': mask_feat}
             
+
+    def coco_inference(self, box_cls, box_pred, kernel_pred, mask_feat, image_sizes):
+
+        assert len(box_cls) == len(image_sizes)
+        results = []
+
+        for i, (logits_per_image, box_pred_per_image, kernel_pred_per_image, mas, image_size) in enumerate(zip(
+            box_cls, box_pred, kernel_pred, mask_feat, image_sizes
+        )):
+
+            num_instance = len(kernel_pred_per_image)
+            weights, biases = parse_dynamic_params(
+                kernel_pred_per_image, #[500, 153]
+                8,
+                self.weight_nums,
+                self.bias_nums)
+            mask_feat_head = mas.unsqueeze(0).repeat(1, num_instance, 1, 1) #[1, 4000, 120, 216]
+            mask_logits = self.mask_heads_forward( #[1, 500, 120, 216]
+                mask_feat_head, 
+                weights, 
+                biases, 
+                num_instance)
+            mask_pred = mask_logits.reshape(-1, 1, mas.size(1), mas.size(2)) #[500, 1, 120, 216]
+
+
+            prob = logits_per_image.sigmoid()
+            nms_scores,idxs = torch.max(prob,1)
+            boxes_before_nms = box_cxcywh_to_xyxy(box_pred_per_image)
+            keep_indices = batched_nms(boxes_before_nms,nms_scores,idxs,0.7)  
+            prob = prob[keep_indices]
+            box_pred_per_image = box_pred_per_image[keep_indices]
+            mask_pred_i = mask_pred[keep_indices]
+
+            topk_values, topk_indexes = torch.topk(prob.view(-1), 100, dim=0)
+            scores = topk_values
+            topk_boxes = torch.div(topk_indexes, logits_per_image.shape[1], rounding_mode='floor')
+            # topk_boxes = topk_indexes // logits_per_image.shape[1]
+            labels = topk_indexes % logits_per_image.shape[1]
+            scores_per_image = scores
+            labels_per_image = labels
+
+            box_pred_per_image = box_pred_per_image[topk_boxes]
+            mask_pred_i = mask_pred_i[topk_boxes]
+
+            result = Instances(image_size)
+            result.pred_boxes = Boxes(box_cxcywh_to_xyxy(box_pred_per_image))
+            result.pred_boxes.scale(scale_x=image_size[1], scale_y=image_size[0])
+            if self.mask_on:
+                N, C, H, W = mask_pred_i.shape
+                mask = F.interpolate(mask_pred_i, size=(H*4, W*4), mode='bilinear', align_corners=False)
+                mask = mask.sigmoid() > 0.5
+                mask = mask[:,:,:image_size[0],:image_size[1]]
+                result.pred_masks = mask
+
+            result.scores = scores_per_image
+            result.pred_classes = labels_per_image
+            results.append(result)
+        return results
+
+
+
     def inference(self, outputs, tracker, ori_size, image_sizes):
         """
         Arguments:
@@ -587,6 +670,20 @@ class ODVIS(nn.Module):
             images_whwh = torch.stack(images_whwh)
             return images, images_whwh, None
 
+
+    def preprocess_coco_image(self, batched_inputs):
+        images = []
+        images_whwh = []
+        for x in batched_inputs:
+            image = x["image"]
+            h, w = image.shape[-2:]
+            images.append(self.normalizer(image.to(self.device)))
+            images_whwh.append(torch.tensor([w, h, w, h], dtype=torch.float32, device=self.device))
+        images = ImageList.from_tensors(images, self.size_divisibility)
+        images_whwh = torch.stack(images_whwh)
+        return images, images_whwh
+
+
     def extract_gt_instances(self, batched_inputs):
         gt_instances = []
         for video in batched_inputs:
@@ -732,3 +829,46 @@ class MLP(nn.Module):
         for i, layer in enumerate(self.layers):
             x = F.relu(layer(x)) if i < self.num_layers - 1 else layer(x)
         return x
+
+
+def segmentation_postprocess(
+    results: Instances, output_height: int, output_width: int, mask_threshold: float = 0.5
+    ):
+
+    if isinstance(output_width, torch.Tensor):
+        # This shape might (but not necessarily) be tensors during tracing.
+        # Converts integer tensors to float temporaries to ensure true
+        # division is performed when computing scale_x and scale_y.
+        output_width_tmp = output_width.float()
+        output_height_tmp = output_height.float()
+        new_size = torch.stack([output_height, output_width])
+    else:
+        new_size = (output_height, output_width)
+        output_width_tmp = output_width
+        output_height_tmp = output_height
+
+    scale_x, scale_y = (
+        output_width_tmp / results.image_size[1],
+        output_height_tmp / results.image_size[0],
+    )
+    results = Instances(new_size, **results.get_fields())
+
+    if results.has("pred_boxes"):
+        output_boxes = results.pred_boxes
+    elif results.has("proposal_boxes"):
+        output_boxes = results.proposal_boxes
+    else:
+        output_boxes = None
+    assert output_boxes is not None, "Predictions must contain boxes!"
+
+    output_boxes.scale(scale_x, scale_y)
+    output_boxes.clip(results.image_size)
+
+    results = results[output_boxes.nonempty()]
+
+    if results.has("pred_masks"):
+        mask = F.interpolate(results.pred_masks.float(), size=(output_height, output_width), mode='nearest')
+        mask = mask.squeeze(1).byte()
+        results.pred_masks = mask
+
+    return results
