@@ -593,9 +593,18 @@ class ODVIS(nn.Module):
                 indices = [indices_top1.tolist()]
             else:
                 nms_scores,idxs = torch.max(logits.sigmoid()[indices],1)
-                boxes_before_nms = box_cxcywh_to_xyxy(output_boxes[indices])
-                keep_indices = batched_nms(boxes_before_nms,nms_scores,idxs,0.9)#.tolist()
+                # boxes_before_nms = box_cxcywh_to_xyxy(output_boxes[indices])
+                keep_indices = batched_nms(output_boxes[indices],nms_scores,idxs,0.9)#.tolist()
                 indices = indices[keep_indices]
+            # # fix the box format
+            # scale_x, scale_y = (
+            #     ori_size[1] / image_sizes[1],
+            #     ori_size[0] / image_sizes[0],
+            # )
+            # o_boxes = Boxes(output_boxes)
+            # o_boxes.scale(scale_x, scale_y)
+            # o_boxes.clip(ori_size)
+            # output_boxes = o_boxes.tensor       
             box_score = torch.max(logits.sigmoid()[indices],1)[0] #[x] or [1]
             det_bboxes = torch.cat([output_boxes[indices],box_score.unsqueeze(1)],dim=1)
             det_labels = torch.argmax(logits.sigmoid()[indices],dim=1)
@@ -689,10 +698,15 @@ class ODVIS(nn.Module):
                     zero_mask = None # padding None instead of zero mask to save memory
                     masks_list_i.append(zero_mask)
                 else:
-                    pred_mask_i =F.interpolate(mask_i[:,None,:,:],  size=(output_h*4, output_w*4) ,mode="bilinear", align_corners=False).sigmoid()
-                    pred_mask_i = pred_mask_i[:,:,:image_sizes[0],:image_sizes[1]] #crop the padding area
-                    pred_mask_i = (F.interpolate(pred_mask_i, size=(ori_size[0], ori_size[1]), mode='nearest')>0.5)[0,0].cpu() # resize to ori video size
-                    masks_list_i.append(pred_mask_i)
+                    pred_global_masks = aligned_bilinear(mask_i.unsqueeze(1).sigmoid(), 4)
+                    pred_global_masks = pred_global_masks[:, :, :image_sizes[0], :image_sizes[1]]
+                    masks = F.interpolate(
+                                    pred_global_masks,
+                                    size=(ori_size[0], ori_size[1]),
+                                    mode='bilinear',
+                                    align_corners=False).squeeze(1)[0].cpu()
+                    masks.gt_(0.5)
+                    masks_list_i.append(masks)
             masks_list.append(masks_list_i)
         if len(logits_list)>0:
             pred_cls = torch.stack(logits_list)
