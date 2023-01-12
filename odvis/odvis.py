@@ -91,6 +91,93 @@ def parse_dynamic_params(params, channels, weight_nums, bias_nums):
     return weight_splits, bias_splits
 
 
+def detector_postprocess(
+    results: Instances, output_height: int, output_width: int, mid_size, mask_threshold: float = 0.5
+):
+    """
+    Resize the output instances.
+    The input images are often resized when entering an object detector.
+    As a result, we often need the outputs of the detector in a different
+    resolution from its inputs.
+    This function will resize the raw outputs of an R-CNN detector
+    to produce outputs according to the desired output resolution.
+    Args:
+        results (Instances): the raw outputs from the detector.
+            `results.image_size` contains the input image resolution the detector sees.
+            This object might be modified in-place.
+        output_height, output_width: the desired output resolution.
+    Returns:
+        Instances: the resized output from the model, based on the output resolution
+    """
+    if isinstance(output_width, torch.Tensor):
+        # This shape might (but not necessarily) be tensors during tracing.
+        # Converts integer tensors to float temporaries to ensure true
+        # division is performed when computing scale_x and scale_y.
+        output_width_tmp = output_width.float()
+        output_height_tmp = output_height.float()
+        new_size = torch.stack([output_height, output_width])
+    else:
+        new_size = (output_height, output_width)
+        output_width_tmp = output_width
+        output_height_tmp = output_height
+
+    scale_x, scale_y = (
+        output_width_tmp / results.image_size[1],
+        output_height_tmp / results.image_size[0],
+    )
+    results = Instances(new_size, **results.get_fields())
+
+    if results.has("pred_boxes"):
+        output_boxes = results.pred_boxes
+    elif results.has("proposal_boxes"):
+        output_boxes = results.proposal_boxes
+    else:
+        output_boxes = None
+    assert output_boxes is not None, "Predictions must contain boxes!"
+
+    output_boxes.scale(scale_x, scale_y)
+    #import pdb;pdb.set_trace()
+    output_boxes.clip(results.image_size)
+    masks = results.pred_masks
+    
+    #masks = F.interpolate(masks.unsqueeze(1), size=new_size, mode='bilinear').squeeze(1)
+    ################################################
+    
+    pred_global_masks = aligned_bilinear(masks.unsqueeze(1), 4)
+    #import pdb;pdb.set_trace()
+    pred_global_masks = pred_global_masks[:, :, :mid_size[0], :mid_size[1]]
+    masks = F.interpolate(
+                    pred_global_masks,
+                    size=(new_size[0], new_size[1]),
+                    mode='bilinear',
+                    align_corners=False).squeeze(1)
+    #################################################
+    masks.gt_(0.5)
+    #masks = masks.long()
+    #import pdb;pdb.set_trace()
+    masks = clip_mask(output_boxes,masks)
+    #import pdb;pdb.set_trace()
+    results.pred_masks = masks
+    results = results[output_boxes.nonempty()]
+    #import pdb;pdb.set_trace()
+    #if results.has("pred_masks"):
+        #if isinstance(results.pred_masks, ROIMasks):
+        #    roi_masks = results.pred_masks
+        #else:
+            # pred_masks is a tensor of shape (N, 1, M, M)
+        #    roi_masks = ROIMasks(results.pred_masks[:, 0, :, :])
+        #results.pred_masks = roi_masks.to_bitmasks(
+        #    results.pred_boxes, output_height, output_width, mask_threshold
+        #).tensor  # TODO return ROIMasks/BitMask object in the future
+
+    if results.has("pred_keypoints"):
+        results.pred_keypoints[:, :, 0] *= scale_x
+        results.pred_keypoints[:, :, 1] *= scale_y
+
+    return results
+
+
+
 def aligned_bilinear(tensor, factor):
     assert tensor.dim() == 4
     assert factor >= 1
@@ -295,14 +382,8 @@ class ODVIS(nn.Module):
             box_pred = output["pred_boxes"]
             kernel_pred = output["pred_kernels"]
             mask_feat = output["mask_feat"]
-            results = self.coco_inference(box_cls, box_pred, kernel_pred, mask_feat, images.image_sizes)
-            processed_results = []
-            for results_per_image, input_per_image, image_size in zip(results, batched_inputs, images.image_sizes):
-                height = input_per_image.get("height", image_size[0])
-                width = input_per_image.get("width", image_size[1])
-                r = segmentation_postprocess(results_per_image, height, width)
-                processed_results.append({"instances": r})
-            return processed_results
+            results = self.coco_inference(box_cls, box_pred, kernel_pred, mask_feat, images.image_sizes, batched_inputs)
+            return results
 
         else:
             images, _, _ = self.preprocess_image(batched_inputs)
@@ -416,7 +497,7 @@ class ODVIS(nn.Module):
         return {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1], 'pred_inst_embed': outputs_inst_embed, 'pred_kernels': outputs_kernel[-1], 'mask_feat': mask_feat}
             
 
-    def coco_inference(self, box_cls, box_pred, kernel_pred, mask_feat, image_sizes):
+    def coco_inference(self, box_cls, box_pred, kernel_pred, mask_feat, image_sizes, batched_inputs, do_postprocess=True):
 
         assert len(box_cls) == len(image_sizes)
         results = []
@@ -442,8 +523,8 @@ class ODVIS(nn.Module):
 
             prob = logits_per_image.sigmoid()
             nms_scores,idxs = torch.max(prob,1)
-            boxes_before_nms = box_cxcywh_to_xyxy(box_pred_per_image)
-            keep_indices = batched_nms(boxes_before_nms,nms_scores,idxs,0.7)  
+            # boxes_before_nms = box_cxcywh_to_xyxy(box_pred_per_image)
+            keep_indices = batched_nms(box_pred_per_image,nms_scores,idxs,0.7)  
             prob = prob[keep_indices]
             box_pred_per_image = box_pred_per_image[keep_indices]
             mask_pred_i = mask_pred[keep_indices]
@@ -460,20 +541,21 @@ class ODVIS(nn.Module):
             mask_pred_i = mask_pred_i[topk_boxes]
 
             result = Instances(image_size)
-            result.pred_boxes = Boxes(box_cxcywh_to_xyxy(box_pred_per_image))
-            result.pred_boxes.scale(scale_x=image_size[1], scale_y=image_size[0])
-            if self.mask_on:
-                N, C, H, W = mask_pred_i.shape
-                mask = F.interpolate(mask_pred_i, size=(H*4, W*4), mode='bilinear', align_corners=False)
-                mask = mask.sigmoid() > 0.5
-                mask = mask[:,:,:image_size[0],:image_size[1]]
-                result.pred_masks = mask
-
+            result.pred_boxes = Boxes(box_pred_per_image)
+            result.pred_masks = mask_pred_i.squeeze(1).sigmoid()
+            # result.pred_boxes.scale(scale_x=image_size[1], scale_y=image_size[0])
             result.scores = scores_per_image
             result.pred_classes = labels_per_image
             results.append(result)
-        return results
-
+        if do_postprocess:
+            processed_results = []
+            for results_per_image, input_per_image, image_size in zip(results, batched_inputs, image_sizes):
+                height = input_per_image.get("height", image_size[0])
+                width = input_per_image.get("width", image_size[1])
+                mid_size = image_size
+                r = detector_postprocess(results_per_image, height, width,mid_size)
+                processed_results.append({"instances": r})
+            return processed_results
 
 
     def inference(self, outputs, tracker, ori_size, image_sizes):
