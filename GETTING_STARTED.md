@@ -1,0 +1,88 @@
+## Installation
+
+First, clone the repository locally:
+
+```bash
+git clone https://github.com/kuantuna/odvis.git
+cd odvis
+```
+
+Install and build detectron2 with the guidelines from [here](https://detectron2.readthedocs.io/en/latest/tutorials/install.html)
+
+### Requirements
+- Linux or macOS with Python ≥ 3.6
+
+- PyTorch ≥ 1.9.0 and torchvision that matches the PyTorch installation. You can install them together at pytorch.org to make sure of this
+
+- OpenCV is optional and needed by demo and visualization
+
+## Data Preparation
+
+
+
+Download and extract 2019 version of YoutubeVIS train and val images with annotations from [CodeLab](https://competitions.codalab.org/competitions/20128#participate-get_data) or [YouTubeVIS](https://youtube-vos.org/dataset/vis/), download [OVIS](https://codalab.lisn.upsaclay.fr/competitions/4763#participate)  and COCO 2017 datasets. Then, link datasets:
+
+```bash
+mkdir datasets/
+cd datasets/
+ln -s /path_to_coco_dataset coco
+ln -s /path_to_YTVIS19_dataset ytvis_2019
+ln -s /path_to_ovis_dataset ovis
+```
+
+
+
+Extract YouTube-VIS 2019, OVIS, COCO 2017 datasets, we expect the directory structure to be the following:
+
+```
+odvis
+├── datasets
+│   ├──ytvis_2019
+│   ├──ovis 
+│   ├──coco 
+...
+ytvis_2019
+├── train
+├── val
+├── annotations
+│   ├── instances_train_sub.json
+│   ├── instances_val_sub.json
+...
+ovis
+├── train
+├── valid
+├── annotations_train.json
+├── annotations_valid.json
+...
+coco
+├── train2017
+├── val2017
+├── annotations
+│   ├── instances_train2017.json
+│   ├── instances_val2017.json
+```
+
+
+## Training the Model
+
+We employed 3 steps in the training process:
+
+1. Pretrain the instance segmentation pipeline (COCO)
+
+2. Pretrain the odvis with pseudo key-reference pairs (COCO)
+    ```
+    python train_net.py --num-gpus 8 --config-file configs/coco_pretrain/r50_coco_sequence.yaml
+    ```
+
+3. Finetune the model (YTVIS)
+    ```
+    python train_net.py --num-gpus 8 --config-file configs/ytvis19_r50.yaml
+    ```
+
+
+
+## Evaluating the Model
+
+```
+python train_net.py --num-gpus 8 --config-file configs/ytvis19_r50.yaml --eval-only
+```
