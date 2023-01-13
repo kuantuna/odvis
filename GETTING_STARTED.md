@@ -71,12 +71,12 @@ We employed 3 steps in the training process:
 
 2. Pretrain the odvis with pseudo key-reference pairs (COCO)
     ```
-    python train_net.py --num-gpus 8 --config-file configs/coco_pretrain/r50_coco_sequence.yaml
+    python train_net.py --num-gpus 8 --config-file odvis/configs/coco_pretrain/r50_coco_sequence.yaml
     ```
 
 3. Finetune the model (YTVIS)
     ```
-    python train_net.py --num-gpus 8 --config-file configs/ytvis19_r50.yaml
+    python train_net.py --num-gpus 8 --config-file odvis/configs/ytvis19_r50.yaml
     ```
 
 
@@ -84,5 +84,5 @@ We employed 3 steps in the training process:
 ## Evaluating the Model
 
 ```
-python train_net.py --num-gpus 8 --config-file configs/ytvis19_r50.yaml --eval-only
+python train_net.py --num-gpus 8 --config-file odvis/configs/ytvis19_r50.yaml --eval-only
 ```
