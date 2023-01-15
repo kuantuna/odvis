@@ -13,7 +13,7 @@ from detectron2.layers import batched_nms
 from detectron2.structures import ImageList, Boxes, Instances
 
 from .loss import SetCriterionDynamicK, HungarianMatcherDynamicK
-from .models.tracker import IDOL_Tracker
+from .tracker import IDOL_Tracker
 from .head import DynamicHead
 from .util.box_ops import box_cxcywh_to_xyxy, box_xyxy_to_cxcywh
 from .util.pos_neg_select import select_pos_neg

@@ -23,8 +23,8 @@ Install and build detectron2 with the guidelines from [here](https://detectron2.
 Download and extract 2019 version of YoutubeVIS train and val images with annotations from [CodeLab](https://competitions.codalab.org/competitions/20128#participate-get_data) or [YouTubeVIS](https://youtube-vos.org/dataset/vis/), download [OVIS](https://codalab.lisn.upsaclay.fr/competitions/4763#participate)  and COCO 2017 datasets. Then, link datasets:
 
 ```bash
-mkdir datasets/
-cd datasets/
+mkdir datasets
+cd datasets
 ln -s /path_to_coco_dataset coco
 ln -s /path_to_YTVIS19_dataset ytvis_2019
 ln -s /path_to_ovis_dataset ovis
@@ -48,12 +48,6 @@ ytvis_2019
 │   ├── instances_train_sub.json
 │   ├── instances_val_sub.json
 ...
-ovis
-├── train
-├── valid
-├── annotations_train.json
-├── annotations_valid.json
-...
 coco
 ├── train2017
 ├── val2017
@@ -63,20 +57,38 @@ coco
 ```
 
 
+## Downloading Pretrained Model Weights
+
+```bash
+mkdir models
+cd models
+```
+
+Download and save the model you need into the models folder. Afterwards, edit the MODEL.WEIGHTS in the corresponding yaml config file.
+
+| Backbone   | Phase 1 | Phase 2 | Phase 3 |
+| ---------- | ------- | ------- | ------- |
+| ResNet-50  | WIP     | WIP     | WIP     | 
+| ResNet-101 | WIP     | WIP     | WIP     |
+| Swin-Large | WIP     | WIP     | WIP     |
+
+
 ## Training the Model
 
 We employed 3 steps in the training process:
 
 1. Pretrain the instance segmentation pipeline (COCO)
 
+    *You can get the model in this step by training [DiffusionInst](https://github.com/chenhaoxing/DiffusionInst).*
+
 2. Pretrain the odvis with pseudo key-reference pairs (COCO)
     ```
-    python train_net.py --num-gpus 8 --config-file odvis/configs/coco_pretrain/r50_coco_sequence.yaml
+    python train_net.py --num-gpus 8 --config-file odvis/configs/phase_02/coco_r50.yaml
     ```
 
 3. Finetune the model (YTVIS)
     ```
-    python train_net.py --num-gpus 8 --config-file odvis/configs/ytvis19_r50.yaml
+    python train_net.py --num-gpus 8 --config-file odvis/configs/phase_03/ytvis19_r50.yaml
     ```
 
 
@@ -84,5 +96,5 @@ We employed 3 steps in the training process:
 ## Evaluating the Model
 
 ```
-python train_net.py --num-gpus 8 --config-file odvis/configs/ytvis19_r50.yaml --eval-only
+python train_net.py --num-gpus 8 --config-file odvis/configs/phase_03/ytvis19_r50.yaml --eval-only
 ```
