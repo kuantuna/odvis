@@ -292,8 +292,12 @@ class ODVIS(nn.Module):
         giou_weight = cfg.MODEL.ODVIS.GIOU_WEIGHT
         l1_weight = cfg.MODEL.ODVIS.L1_WEIGHT
         no_object_weight = cfg.MODEL.ODVIS.NO_OBJECT_WEIGHT
+        reid_weight = cfg.ODVIS.REID_WEIGHT
+        mask_weight = cfg.ODVIS.MASK_WEIGHT
+        dice_weight = cfg.ODVIS.DICE_WEIGHT
 
-        weight_dict = {"loss_ce": class_weight, "loss_bbox": l1_weight, "loss_giou": giou_weight}
+        weight_dict = {"loss_ce": class_weight, "loss_bbox": l1_weight, "loss_giou": giou_weight,
+                       "loss_reid": reid_weight/8, "loss_reid_aux": reid_weight*1.5, "loss_mask": mask_weight, "loss_dice": dice_weight}
 
 
         matcher = HungarianMatcherDynamicK(
