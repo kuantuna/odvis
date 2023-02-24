@@ -70,7 +70,7 @@ Download and save the model you need into the models folder. Afterwards, edit th
 | ---------- | ------- | ------- | ------- |
 | ResNet-50  | WIP     | WIP     | WIP     | 
 | ResNet-101 | WIP     | WIP     | WIP     |
-| Swin-Large | WIP     | WIP     | WIP     |
+| Swin-Base  | WIP     | WIP     | WIP     |
 
 
 ## Training the Model

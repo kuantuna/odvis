@@ -7,7 +7,7 @@ MODEL:
     NAME: "build_resnet_fpn_backbone"
   MASK_ON: True
   RESNETS:
-    DEPTH: 50
+    DEPTH: 101
     STRIDE_IN_1X1: False
     OUT_FEATURES: ["res2", "res3", "res4", "res5"]
   FPN:
@@ -63,6 +63,6 @@ DATALOADER:
   FILTER_EMPTY_ANNOTATIONS: False
   NUM_WORKERS: 8
 VERSION: 2
-OUTPUT_DIR: ./ODVIS_COCO_R50_P2
+OUTPUT_DIR: ./ODVIS_COCO_R101_P2
 TEST:
   EVAL_PERIOD: 5000
