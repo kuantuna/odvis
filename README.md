@@ -16,10 +16,12 @@ The installation instruction and usage are in [Getting Started with ODVIS](https
 | YTVIS19 - ResNet-50  | 33.7 | 54.0 | 37.6 |
 | YTVIS19 - ResNet-101 | WIP  | WIP  | WIP  |
 | YTVIS19 - Swin-Base  | WIP  | WIP  | WIP  |
-| ----------           | ---- | ---- | ---- |
 | YTVIS21 - ResNet-50  | WIP  | WIP  | WIP  |
 | YTVIS21 - ResNet-101 | WIP  | WIP  | WIP  |
 | YTVIS21 - Swin-Base  | WIP  | WIP  | WIP  |
+| OVIS    - ResNet-50  | WIP  | WIP  | WIP  |
+| OVIS    - ResNet-101 | WIP  | WIP  | WIP  |
+| OVIS    - Swin-Base  | WIP  | WIP  | WIP  |
 
 
 ## Citing ODVIS

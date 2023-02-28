@@ -4,3 +4,9 @@ datasets/
 output/
 models/
 demo/
+ODVIS_COCO_R50_P2/
+ODVIS_COCO_R101_P2/
+ODVIS_COCO_SwinB_P2/
+ODVIS_COCO_R50_P3/
+ODVIS_COCO_R101_P3/
+ODVIS_COCO_SwinB_P3/

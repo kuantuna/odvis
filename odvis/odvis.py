@@ -292,13 +292,17 @@ class ODVIS(nn.Module):
         giou_weight = cfg.MODEL.ODVIS.GIOU_WEIGHT
         l1_weight = cfg.MODEL.ODVIS.L1_WEIGHT
         no_object_weight = cfg.MODEL.ODVIS.NO_OBJECT_WEIGHT
-        reid_weight = cfg.ODVIS.REID_WEIGHT
-        mask_weight = cfg.ODVIS.MASK_WEIGHT
-        dice_weight = cfg.ODVIS.DICE_WEIGHT
+        reid_weight = cfg.MODEL.ODVIS.REID_WEIGHT
+        mask_weight = cfg.MODEL.ODVIS.MASK_WEIGHT
+        dice_weight = cfg.MODEL.ODVIS.DICE_WEIGHT
 
         weight_dict = {"loss_ce": class_weight, "loss_bbox": l1_weight, "loss_giou": giou_weight,
                        "loss_reid": reid_weight/8, "loss_reid_aux": reid_weight*1.5, "loss_mask": mask_weight, "loss_dice": dice_weight}
-
+        if self.deep_supervision:
+            aux_weight_dict = {}
+            for i in range(self.num_heads - 1):
+                aux_weight_dict.update({k + f"_{i}": v for k, v in weight_dict.items()})
+            weight_dict.update(aux_weight_dict)
 
         matcher = HungarianMatcherDynamicK(
             cfg=cfg, cost_class=class_weight, cost_bbox=l1_weight, cost_giou=giou_weight, use_focal=self.use_focal

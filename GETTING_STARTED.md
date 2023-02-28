@@ -7,14 +7,21 @@ git clone https://github.com/kuantuna/odvis.git
 cd odvis
 ```
 
-Install and build detectron2 with the guidelines from [here](https://detectron2.readthedocs.io/en/latest/tutorials/install.html)
-
 ### Requirements
 - Linux or macOS with Python ≥ 3.6
 
 - PyTorch ≥ 1.9.0 and torchvision that matches the PyTorch installation. You can install them together at pytorch.org to make sure of this
 
 - OpenCV is optional and needed by demo and visualization
+
+
+Install and build detectron2 with the guidelines from [here](https://detectron2.readthedocs.io/en/latest/tutorials/install.html)
+
+```bash
+pip install timm
+pip install shapely
+pip install git+https://github.com/youtubevos/cocoapi.git#"egg=pycocotools&subdirectory=PythonAPI"
+```
 
 ## Data Preparation
 
@@ -47,6 +54,12 @@ ytvis_2019
 ├── annotations
 │   ├── instances_train_sub.json
 │   ├── instances_val_sub.json
+...
+ovis
+├── train
+├── valid
+├── annotations_train.json
+├── annotations_valid.json
 ...
 coco
 ├── train2017
