@@ -21,7 +21,6 @@ MODEL:
   ODVIS:
     NUM_PROPOSALS: 500
     NUM_CLASSES: 80
-    MULTI_CLS_ON: True
 DATASETS:
   TRAIN: ("coco_2017_train",)
   TEST: ("coco_2017_val",)
@@ -41,19 +40,11 @@ SOLVER:
     CLIP_VALUE: 1.0 # 0.01
     NORM_TYPE: 2.0
   CHECKPOINT_PERIOD: 5000
+SEED: 40244023
 INPUT:
-  SAMPLING_FRAME_NUM: 2
-  SAMPLING_FRAME_RANGE:  10
-  # MIN_SIZE_TRAIN_SAMPLING : ["range", "choice", "range_by_clip", "choice_by_clip"]
-  MIN_SIZE_TRAIN_SAMPLING: "choice"
-  # RANDOM_FLIP : ["none", "horizontal", "flip_by_clip"]. "horizontal" is set by default.
-  RANDOM_FLIP: "flip_by_clip"
-  # AUGMENTATIONS: []
-  # MIN_SIZE_TRAIN: (360, 480)
-  MIN_SIZE_TRAIN: (320, 352, 392, 416, 448, 480, 512, 544, 576, 608, 640)
-  MIN_SIZE_TEST: 640
+  MIN_SIZE_TRAIN: (480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800)
   CROP:
-    ENABLED: True # False
+    ENABLED: True
     TYPE: "absolute_range"
     SIZE: (384, 600)
   FORMAT: "RGB"

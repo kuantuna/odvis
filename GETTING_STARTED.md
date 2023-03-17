@@ -10,7 +10,7 @@ cd odvis
 ### Requirements
 - Linux or macOS with Python ≥ 3.6
 
-- PyTorch ≥ 1.9.0 and torchvision that matches the PyTorch installation. You can install them together at pytorch.org to make sure of this
+- PyTorch ≥ 1.9.0 and torchvision that matches the PyTorch installation. You can install them together at [pytorch.org](https://pytorch.org/get-started/locally/)
 
 - OpenCV is optional and needed by demo and visualization
 
@@ -99,7 +99,7 @@ We employed 3 steps in the training process:
     python train_net.py --num-gpus 8 --config-file configs/phase_02/coco_r50.yaml
     ```
 
-3. Finetune the model (YTVIS)
+3. Finetune the model (YTVIS or OVIS)
     ```
     python train_net.py --num-gpus 8 --config-file configs/phase_03/ytvis19_r50.yaml
     ```

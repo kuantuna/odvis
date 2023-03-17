@@ -297,7 +297,7 @@ class ODVIS(nn.Module):
         dice_weight = cfg.MODEL.ODVIS.DICE_WEIGHT
 
         weight_dict = {"loss_ce": class_weight, "loss_bbox": l1_weight, "loss_giou": giou_weight,
-                       "loss_reid": reid_weight/8, "loss_reid_aux": reid_weight*1.5, "loss_mask": mask_weight, "loss_dice": dice_weight}
+                       "loss_reid": reid_weight, "loss_reid_aux": 3.0, "loss_mask": mask_weight, "loss_dice": dice_weight}
         if self.deep_supervision:
             aux_weight_dict = {}
             for i in range(self.num_heads - 1):
@@ -500,7 +500,7 @@ class ODVIS(nn.Module):
 
             if self.box_renewal:  # filter
                 # replenish with randn boxes
-                img = torch.cat((img, torch.randn(batch, self.num_proposals - num_remain, 4, device=img.device)), dim=1)
+                img = torch.cat((img, torch.randn(1, self.num_proposals - num_remain, 4, device=img.device)), dim=1)
         
         return {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1], 'pred_inst_embed': outputs_inst_embed, 'pred_kernels': outputs_kernel[-1], 'mask_feat': mask_feat}
             
@@ -754,9 +754,9 @@ class ODVIS(nn.Module):
         images = []
         images_whwh = []
         for video in batched_inputs:
+            h, w = video["image"][0].shape[-2:]
+            images_whwh.append(torch.tensor([w, h, w, h], dtype=torch.float32, device=self.device))
             for frame in video["image"]:
-                h, w = frame.shape[-2:]
-                images_whwh.append(torch.tensor([w, h, w, h], dtype=torch.float32, device=self.device))
                 images.append(self.normalizer(frame.to(self.device)))  
         if self.training:
             bz = len(images)//2
@@ -766,7 +766,7 @@ class ODVIS(nn.Module):
             ref_images = [images[_i] for _i in ref_ids] # some of the new_targets go here
             key_images = ImageList.from_tensors(key_images, self.size_divisibility)
             ref_images = ImageList.from_tensors(ref_images, self.size_divisibility)
-            images_whwh = [images_whwh[_i] for _i in key_ids]
+
             images_whwh = torch.stack(images_whwh)
             return key_images, ref_images, images_whwh
         else:
