@@ -297,7 +297,7 @@ class ODVIS(nn.Module):
         dice_weight = cfg.MODEL.ODVIS.DICE_WEIGHT
 
         weight_dict = {"loss_ce": class_weight, "loss_bbox": l1_weight, "loss_giou": giou_weight,
-                       "loss_reid": reid_weight, "loss_reid_aux": 3.0, "loss_mask": mask_weight, "loss_dice": dice_weight}
+                       "loss_reid": reid_weight, "loss_reid_aux": reid_weight*1.5, "loss_mask": mask_weight, "loss_dice": dice_weight}
         if self.deep_supervision:
             aux_weight_dict = {}
             for i in range(self.num_heads - 1):
@@ -407,8 +407,21 @@ class ODVIS(nn.Module):
                     clip_inputs = [{'image':batched_inputs[0]['image'][start_idx:end_idx]}]
                     clip_images, images_whwh, _ = self.preprocess_image(clip_inputs)
                     src = self.backbone(clip_images.tensor)
-                    features = [src[f] for f in self.in_features]
-                    clip_output = self.inference_forward(features, images_whwh)
+                    clip_output = {'pred_logits': [], 'pred_boxes': [], 'pred_inst_embed': [], 'pred_kernels': [], 'mask_feat': []}
+                    for frame_idx in range(len(clip_images)):
+                        features = [src[f][frame_idx].unsqueeze(dim=0) for f in self.in_features]
+                        frame_output = self.inference_forward(features, images_whwh)
+                        clip_output['pred_logits'].append(frame_output['pred_logits'].squeeze(dim=0))
+                        clip_output['pred_boxes'].append(frame_output['pred_boxes'].squeeze(dim=0))
+                        clip_output['pred_inst_embed'].append(frame_output['pred_inst_embed'].squeeze(dim=0))
+                        clip_output['pred_kernels'].append(frame_output['pred_kernels'].squeeze(dim=0))
+                        clip_output['mask_feat'].append(frame_output['mask_feat'].squeeze(dim=0))
+                    clip_output['pred_logits'] = torch.stack(clip_output['pred_logits'])
+                    clip_output['pred_boxes'] = torch.stack(clip_output['pred_boxes'])
+                    clip_output['pred_inst_embed'] = torch.stack(clip_output['pred_inst_embed'])
+                    clip_output['pred_kernels'] = torch.stack(clip_output['pred_kernels'])
+                    clip_output['mask_feat'] = torch.stack(clip_output['mask_feat'])
+                    
                     logits_list.append(clip_output['pred_logits'])
                     boxes_list.append(clip_output['pred_boxes'])
                     embed_list.append(clip_output['pred_inst_embed'])
@@ -427,8 +440,20 @@ class ODVIS(nn.Module):
             else:
                 images, images_whwh, _ = self.preprocess_image(batched_inputs)
                 src = self.backbone(images.tensor)
-                features = [src[f] for f in self.in_features]
-                output = self.inference_forward(features, images_whwh)
+                output = {'pred_logits': [], 'pred_boxes': [], 'pred_inst_embed': [], 'pred_kernels': [], 'mask_feat': []}
+                for frame_idx in range(len(images)):
+                    features = [src[f][frame_idx].unsqueeze(dim=0) for f in self.in_features]
+                    frame_output = self.inference_forward(features, images_whwh)
+                    output['pred_logits'].append(frame_output['pred_logits'].squeeze(dim=0))
+                    output['pred_boxes'].append(frame_output['pred_boxes'].squeeze(dim=0))
+                    output['pred_inst_embed'].append(frame_output['pred_inst_embed'].squeeze(dim=0))
+                    output['pred_kernels'].append(frame_output['pred_kernels'].squeeze(dim=0))
+                    output['mask_feat'].append(frame_output['mask_feat'].squeeze(dim=0))
+                output['pred_logits'] = torch.stack(output['pred_logits'])
+                output['pred_boxes'] = torch.stack(output['pred_boxes'])
+                output['pred_inst_embed'] = torch.stack(output['pred_inst_embed'])
+                output['pred_kernels'] = torch.stack(output['pred_kernels'])
+                output['mask_feat'] = torch.stack(output['mask_feat'])
 
             idol_tracker = IDOL_Tracker(
                     init_score_thr= 0.2,
